@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# Secrets — never tracked. See .env.example for the shape.
+.env
+*.env
+!.env.example
+
+# Experiment output and fetched data. Runs are reproducible; artifacts are not tracked.
+runs/
+data/
+*.sqlite
+*.sqlite3
+
+# Model weights / caches, in case anything lands locally
+*.gguf
+*.safetensors
+checkpoints/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

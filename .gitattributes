@@ -1,0 +1,18 @@
+# Normalise line endings. CI runs on Linux and the repo is public, so LF in the index is the
+# only sane contract; checkouts on Windows still get native endings where it matters.
+* text=auto eol=lf
+
+*.py     text eol=lf
+*.toml   text eol=lf
+*.md     text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.jsonl  text eol=lf
+# Lock files stay diffable on purpose: in a public repo a dependency change is exactly the kind of
+# thing a reviewer should be able to see.
+*.lock   text eol=lf
+
+*.png    binary
+*.jpg    binary
+*.gguf   binary
+*.safetensors binary
