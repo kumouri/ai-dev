@@ -100,12 +100,19 @@ def main(argv: list[str] | None = None) -> int:
 
     train_settings = TrainSettings(
         model=args.model or (SMOKE_POLICY if args.smoke else DEFAULT_POLICY),
-        output_dir=Path(cfg.runs_dir) / f"{args.label}-{args.model or 'default'}".replace("/", "_"),
+        # Checkpoints go under their own subtree, not alongside experiment run records — otherwise
+        # `report.py --latest` finds a checkpoint directory instead of the last run.
+        output_dir=Path(cfg.runs_dir)
+        / "checkpoints"
+        / f"{args.label}-{args.model or 'default'}".replace("/", "_"),
         num_generations=args.k,
         max_steps=5 if args.smoke else args.max_steps,
     )
 
-    with RunWriter.create(args.label) as writer:
+    # A dry run deliberately scores malformed completions, so its record would otherwise read as a
+    # training run that got everything wrong. Name it for what it is.
+    label = f"{args.label}-dryrun" if args.dry_run else args.label
+    with RunWriter.create(label) as writer:
         run_id = writer.run_dir.name
         writer.write_meta(
             run_id=run_id,
