@@ -76,6 +76,21 @@ class TrainSettings:
     seed: int = 0
     use_vllm: bool = False
     report_to: list[str] = field(default_factory=list)
+    #: Stop sequences, passed through ``generation_kwargs``. **Off, because it does not work in TRL
+    #: 1.9.2** — tried and rejected rather than assumed:
+    #:
+    #:     ValueError: There are one or more stop strings ... but we could not locate a tokenizer.
+    #:     When generating with stop strings, you must pass the model's tokenizer to the
+    #:     `tokenizer` argument of `generate`.
+    #:
+    #: TRL does not forward its processing class into ``generate``, so the knob is unusable from
+    #: here. It matters because the 0.5B smoke clipped **100%** of completions
+    #: (``clipped_ratio: 1``, ``mean_terminated_length: 0``): the policy emits its JSON block and
+    #: then rambles to the token cap without ever producing EOS. Every completion truncated means
+    #: the parse successes were incidental and rambling cost the policy nothing.
+    #: Next thing to try is ``eos_token_id`` in ``generation_kwargs`` — ids need no tokenizer at
+    #: generation time, only at setup. See ``docs/ROADMAP.md`` phase 3.
+    stop_strings: list[str] | None = None
 
     def __post_init__(self) -> None:
         """Resolve and check the batch/group arithmetic TRL enforces.
@@ -114,7 +129,9 @@ class TrainSettings:
         return self.per_device_train_batch_size * self.gradient_accumulation_steps
 
     def as_config_kwargs(self) -> dict:
+        generation_kwargs = {"stop_strings": list(self.stop_strings)} if self.stop_strings else None
         return {
+            "generation_kwargs": generation_kwargs,
             "output_dir": str(self.output_dir),
             "num_generations": self.num_generations,
             "per_device_train_batch_size": self.per_device_train_batch_size,
