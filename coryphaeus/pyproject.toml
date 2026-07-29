@@ -24,6 +24,18 @@ data = ["datasets>=2.19"]
 # Optional stronger answer verifier. reward.py uses it when importable and falls back to its own
 # sympy comparison when not, so this extra is a bonus, never a requirement.
 verify = ["math-verify>=0.5"]
+# GRPO training. Linux-only on purpose: training runs in WSL2 where CUDA passthrough works, and
+# bitsandbytes has no dependable Windows wheel. Gating by marker keeps `uv lock` resolvable on both
+# platforms instead of failing the whole workspace for a dependency Windows never uses.
+# `coryphaeus.train` itself imports without any of these — the reward path is testable offline.
+train = [
+    "torch>=2.6; sys_platform == 'linux'",
+    "transformers>=4.45; sys_platform == 'linux'",
+    "trl>=0.12; sys_platform == 'linux'",
+    "accelerate>=1.0; sys_platform == 'linux'",
+    "bitsandbytes>=0.43; sys_platform == 'linux'",
+    "datasets>=2.19",
+]
 
 [build-system]
 requires = ["hatchling"]
