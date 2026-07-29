@@ -98,17 +98,52 @@ The honest options, none of them yet chosen:
 
 **Deliberately not decided here.** Measure first.
 
-## Phase 2 — training environment ⬜
+## Phase 2 — training environment ✅
 
-Fresh WSL2 Ubuntu-24.04 (CUDA passthrough; the existing WSL1 distro cannot), distro and Hugging Face
-cache on a roomy volume rather than the system drive. torch + TRL, `nvidia-smi` and `torch.cuda`
-verified inside the distro, then an overfit-one-batch sanity run before any real training.
+Fresh WSL2 **Ubuntu-24.04** on a roomy volume (196 GB VHDX, 185 GB free), leaving the pre-existing
+WSL1 distro untouched — WSL1 cannot do CUDA passthrough. Verified inside the distro:
 
-## Phase 3 — GRPO on a small policy ⬜
+```
+kernel      6.18.33.2-microsoft-standard-WSL2      /dev/dxg present
+torch       2.13.0+cu130   cuda.is_available() True
+device      RTX 4090, capability (8, 9), driver 610.47
+bf16 matmul ok
+```
 
-Qwen2.5-1.5B-Instruct, full GRPO, workers from phase 1, reward from phase 0. Watch the parse-failure
-reason codes as first-class metrics: a policy that stops emitting valid workflows is the first thing
-that goes wrong. Price the cost term into the reward once accuracy moves.
+**The CUDA toolkit was not needed** — a step this plan originally included and shouldn't have. The
+torch wheel bundles its own CUDA 13.0 runtime and reaches the driver through WSL's
+`/usr/lib/wsl/lib` passthrough, so `apt install cuda-toolkit` would have been ~3 GB for nothing *and*
+carried the real risk it exists to warn about: installing a **driver** package inside WSL clobbers
+those passthrough stubs. Add the toolkit only if something genuinely needs `nvcc` (compiling
+flash-attn, some Unsloth paths) — not on principle.
+
+Caches live inside the distro's ext4 (`~/.cache/huggingface`, `~/.cache/uv`), not on a `/mnt` drvfs
+mount: drvfs is slow and breaks the hardlinks the HF cache relies on. The VHDX is already on the
+roomy volume, so the space is there either way.
+
+**Not yet verified:** `mem_get_info` with the GPU idle — the phase-0 baseline was holding ~14 GB at
+the time, so the reading was 9.4 of 24 GiB free. Re-check once the card is quiet.
+
+## Phase 3 — GRPO on a small policy 🚧
+
+| # | Item | Status |
+|---|---|---|
+| 3.1 | `train/dataset.py` — rows carrying prompt + gold + **the pool that prompt advertised** | ✅ |
+| 3.2 | `train/bridge.py` — async→sync reward seam, one `gather` per batch, explicit timeout | ✅ |
+| 3.3 | `train/grpo.py` — trainer config (pin TRL and read its installed signature first) | ⬜ |
+| 3.4 | 0.5B smoke: advantages non-degenerate, no NaNs, checkpoint written | ⬜ |
+| 3.5 | Qwen2.5-1.5B real run on GSM8K train | ⬜ |
+| 3.6 | Evaluate with `run_baseline.py` unchanged, against the phase-0 table | ⬜ |
+
+The reward path is **fully testable offline before a GPU is involved**: `train/` imports without torch
+or TRL, and the fake pool covers batch ordering, per-item pools, malformed completions, and the
+timeout. The pool column is load-bearing — the prompt advertises a catalogue, so scoring must honour
+*that* catalogue or routing to a worker the conductor was never shown would be silently accepted.
+
+Watch the parse-failure reason codes as first-class metrics: a policy that stops emitting valid
+workflows is the first thing that goes wrong, and phase 0 showed the prompted conductor's entire
+deficit was formatting rather than routing. Price the cost term into the reward only once accuracy
+moves.
 
 ## Phase 4 — scale the policy ⬜
 
