@@ -61,8 +61,23 @@ uv run python coryphaeus/scripts/run_baseline.py --help
 - **Ollama defaults to `127.0.0.1:11434`** in code; if this machine serves it elsewhere, that lives
   in the local `.env` (`OLLAMA_BASE_URL`), never in a tracked default. `smoke_workers.py` prints the
   URL it resolved, so a wrong one is one line of output rather than a mystery.
-- **Featherless throttles by concurrency units** (small model = 1, 70B+ = 4; a Premium account has
-  4 total, then HTTP 429). The registry's governor enforces this; don't bypass it with raw clients.
+- **Concurrency units come from the provider, not from a size guess.** Featherless publishes
+  `concurrency_cost` per model; the pinned manifest
+  (`src/coryphaeus/manifests/featherless_pool.json`, refreshed by `scripts/featherless_catalog.py`)
+  carries it. `units_for_params` is a **fallback only** — the 24–32B band costs 2, not 4. A 4-unit
+  worker consumes a 4-unit account outright and serializes every other rollout.
+- **Reasoning models return reasoning instead of an answer.** Both adapters default to thinking
+  *off* (`think=False` → Ollama's `think` field, Featherless's
+  `chat_template_kwargs={"enable_thinking": false}`). Left on with a modest token budget, a model
+  burns the budget thinking and returns a truncated, plausible, **wrong** answer — which scores as
+  incompetence rather than misconfiguration. Observed both locally and remotely.
+- **Transient failures must never be scored.** Under GRPO a failed rollout scores zero, and zero
+  teaches the policy "that worker was a bad choice" — so a provider hiccup would be laundered into a
+  routing lesson. `WorkerBusy` covers 429/502/503/504 **and** the provider's transient error codes,
+  which arrive on a `400` (`completion_error`). Permanent failures (403 gated, 404 bad id) are
+  returned as outcomes and not retried. See `docs/ROADMAP.md` → "infrastructure noise in the reward".
+- **`.gitignore` ignores any directory named `data/`**, at any depth. That is why the pinned manifest
+  lives in `manifests/` — a `data/` directory inside the package would silently not be committed.
 - **A malformed workflow is a reward signal, not an exception.** Parse failures are recorded with a
   reason and scored zero. Never "helpfully" repair a workflow with a second model call — that
   launders the very error the policy needs to learn from.

@@ -1,0 +1,62 @@
+{
+  "pinned_at": "2026-07-29T22:21:03.925870+00:00",
+  "source": "featherless /v1/models (concurrency_cost is the provider's own number)",
+  "workers": [
+    {
+      "name": "qwen25-math-7b",
+      "model": "Qwen/Qwen2.5-Math-7B-Instruct",
+      "model_class": "qwen25-7b",
+      "params_b": 7.0,
+      "units": 1,
+      "tags": [
+        "math",
+        "fast"
+      ],
+      "context_length": 32768
+    },
+    {
+      "name": "qwen25-14b",
+      "model": "Qwen/Qwen2.5-14B-Instruct",
+      "model_class": "qwen25-14b",
+      "params_b": 14.0,
+      "units": 1,
+      "tags": [
+        "balanced"
+      ],
+      "context_length": 32768
+    },
+    {
+      "name": "qwen25-32b",
+      "model": "Qwen/Qwen2.5-32B-Instruct",
+      "model_class": "qwen25-32b",
+      "params_b": 32.0,
+      "units": 2,
+      "tags": [
+        "strong"
+      ],
+      "context_length": 32768
+    },
+    {
+      "name": "qwen3-32b",
+      "model": "Qwen/Qwen3-32B",
+      "model_class": "qwen3-32b",
+      "params_b": 32.0,
+      "units": 2,
+      "tags": [
+        "strong"
+      ],
+      "context_length": 32768
+    },
+    {
+      "name": "qwen25-72b",
+      "model": "Qwen/Qwen2.5-72B-Instruct",
+      "model_class": "qwen25-72b",
+      "params_b": 72.0,
+      "units": 4,
+      "tags": [
+        "strong"
+      ],
+      "context_length": 32768
+    }
+  ]
+}

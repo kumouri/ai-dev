@@ -49,6 +49,20 @@ class WorkerRegistry:
     def names(self) -> tuple[str, ...]:
         return tuple(self._workers)
 
+    def subset(self, names: Iterable[str]) -> WorkerRegistry:
+        """A view over a subset of these workers, in the order given.
+
+        The returned registry holds the **same worker objects**, deliberately: governor backoff
+        state, call counters and HTTP clients are per-worker and must not fork when a rollout is
+        handed a sampled pool. Only the membership — and therefore ``catalog_text()`` and what
+        ``workflow.parse`` will accept — differs.
+
+        Raises:
+            KeyError: if a name is not in this registry, rather than silently dropping it. A pool
+                sample that references a worker we do not have is a bug, not a filter.
+        """
+        return WorkerRegistry(self.get(name) for name in names)
+
     def specs(self) -> tuple[WorkerSpec, ...]:
         return tuple(w.spec for w in self._workers.values())
 

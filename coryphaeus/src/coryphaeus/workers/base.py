@@ -15,7 +15,27 @@ from typing import Protocol, runtime_checkable
 
 
 class WorkerBusy(Exception):
-    """Provider signalled over-capacity (HTTP 429). The governor backs this worker off."""
+    """The provider said "not now" — the governor backs this worker off and retries.
+
+    Raised for **transient** conditions only: HTTP 429 (rate/concurrency limit) and 502/503/504
+    (gateway and capacity errors, e.g. Featherless's ``capacity_exhausted``).
+
+    Why the distinction matters more than it looks: under GRPO, a rollout that fails is scored zero,
+    and zero is how the policy learns "routing there was a bad choice". If a provider hiccup were
+    reported as an ordinary failure, infrastructure noise would be laundered into a routing lesson
+    and the policy would learn to avoid a perfectly good worker. Permanent failures (403 on a gated
+    model, 404 on a bad id) are *not* this — those are real, and retrying them just wastes time.
+    """
+
+
+#: Statuses the governor should back off and retry rather than treat as an outcome.
+TRANSIENT_STATUSES = frozenset({429, 502, 503, 504})
+
+#: Provider error codes that mean "try again" **despite arriving with a 4xx status**. Featherless
+#: returns ``400 completion_error`` for a transient generation failure (observed live 2026-07-29: a
+#: model that answered correctly moments earlier). Status alone is not enough to classify these, and
+#: getting it wrong scores a working worker as a bad routing choice.
+TRANSIENT_ERROR_CODES = frozenset({"completion_error", "capacity_exhausted", "server_error"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,10 +126,24 @@ class timed:
 
 
 def units_for_params(params_b: float | None) -> int:
-    """Featherless's published concurrency pricing: under 16B costs 1 unit, larger costs 4.
+    """**Fallback only.** Estimate concurrency units from parameter count.
 
-    Unknown size is treated as large, because guessing cheap is the mistake that produces 429s.
+    Prefer the provider's own number: Featherless reports ``concurrency_cost`` per model on
+    ``/v1/models``, and a catalogue snapshot (``manifests/featherless_pool.json``, refreshed by
+    ``scripts/featherless_catalog.py``) carries it. Use this function only for a model absent from
+    the snapshot.
+
+    Why it is not good enough on its own: the real distribution has **four** tiers, not two, and the
+    24–32B band costs **2** — so this heuristic over-reserves on exactly the mid-size workers a
+    router most wants, halving effective concurrency for nothing. ``Qwen2.5-32B-Instruct`` is the
+    pinned counter-example in ``tests/test_pool_sampling.py``.
+
+    Unknown size still estimates high: guessing cheap is the mistake that produces 429s.
     """
     if params_b is None:
         return 4
-    return 1 if params_b < 16 else 4
+    if params_b < 16:
+        return 1
+    if params_b < 40:
+        return 2
+    return 4
