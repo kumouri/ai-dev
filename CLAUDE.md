@@ -38,6 +38,13 @@ coryphaeus/
   docs/                   # DESIGN (systems), RESEARCH (ML), ROADMAP (phases), adr/
 ```
 
+## CI
+
+`.github/workflows/ci.yml` runs on PRs into `develop` and `main` (no push triggers — Git Flow) and
+does `uv sync --locked --dev` → `ruff check` → `ruff format --check` → `pytest -m "not live and not
+data"`. Reproduce it locally with those four commands. `--locked` means a dependency change with a
+stale `uv.lock` fails CI rather than resolving differently on the runner.
+
 ## Key commands
 
 ```bash

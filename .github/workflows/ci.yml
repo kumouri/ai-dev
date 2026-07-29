@@ -1,0 +1,46 @@
+name: CI
+
+# Git Flow: feature PRs target develop, release PRs target main. No push triggers —
+# a merge into develop was already validated by its PR, and pushes to main arrive
+# only via release PRs.
+on:
+  pull_request:
+    branches: [develop, main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: lint + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # --locked fails if uv.lock is stale, so a dependency change that was never
+      # locked cannot slip through. The interpreter comes from .python-version.
+      # --dev only: the data and verify extras are not needed by the offline suite,
+      # and pulling pyarrow into every run buys nothing.
+      - name: Install dependencies
+        run: uv sync --locked --dev
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      # The suite must stay fully offline. `live` needs a real provider and `data`
+      # needs a fetched dataset; neither belongs in CI, and excluding them here is
+      # what keeps that promise enforceable rather than aspirational.
+      - name: Tests
+        run: uv run pytest -m "not live and not data"
