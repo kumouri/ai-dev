@@ -13,7 +13,14 @@ import sys
 from pathlib import Path
 
 from coryphaeus.config import settings
-from coryphaeus.reporting import render_parse_failures, render_table, render_verdict, summarize
+from coryphaeus.reporting import (
+    oracle_ceiling,
+    render_oracle,
+    render_parse_failures,
+    render_table,
+    render_verdict,
+    summarize,
+)
 from coryphaeus.telemetry import read_jsonl
 
 
@@ -105,6 +112,10 @@ def main(argv: list[str] | None = None) -> int:
     print(render_table(summaries))
     print()
     print(render_verdict(summaries))
+    view = oracle_ceiling(rollout_rows)
+    if view is not None:
+        print()
+        print(render_oracle(view))
     print("\nparse failures by reason:")
     print(render_parse_failures(rollout_rows))
 

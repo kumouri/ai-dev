@@ -193,7 +193,8 @@ the time, so the reading was 9.4 of 24 GiB free. Re-check once the card is quiet
 | 3.1 | `train/dataset.py` — rows carrying prompt + gold + **the pool that prompt advertised** | ✅ |
 | 3.2 | `train/bridge.py` — async→sync reward seam, one `gather` per batch, explicit timeout | ✅ |
 | 3.3 | `train/grpo.py` + `scripts/train_grpo.py` — verified against **TRL 1.9.2** | ✅ |
-| 3.4 | 0.5B smoke: advantages non-degenerate, no NaNs, checkpoint written | ⬜ blocked on a free GPU |
+| 3.4 | 0.5B smoke: advantages non-degenerate, no NaNs, checkpoint written | ✅ |
+| 3.4b | Fix 100% completion clipping before the real run | ⬜ |
 | 3.5 | Qwen2.5-1.5B real run on GSM8K train | ⬜ |
 | 3.6 | Evaluate with `run_baseline.py` unchanged, against the phase-0 table | ⬜ |
 
@@ -224,6 +225,37 @@ reward-function seam, that is the door.
 `--dry-run` now does everything except `trainer.train()` — including constructing the real
 `GRPOTrainer` — because construction is exactly where an API change surfaces. Current status against
 TRL 1.9.2: trainer builds, **no config setting dropped**.
+
+### 3.4 — the smoke run passed, and found the next problem
+
+Qwen2.5-0.5B-Instruct, 32 GSM8K questions, k=4, 5 steps, ~321 s total.
+
+**Exit gate met.** `reward: 0.25`, `reward_std: 0.5`, **`frac_reward_zero_std: 0`** — every group had
+reward variance, so advantages are non-degenerate and there is something to learn from. No NaNs
+(`loss ≈ -1.5e-08`, expected for a policy-gradient surrogate at beta=0). Checkpoint written.
+
+**Throughput, as the plan asked:** ~20 s/step early, spiking to 151 s on a later step. The spikes are
+provider retries, not compute — confirming the prediction that with remote workers the **network, not
+backprop, is the ceiling**. Budget the real run on that basis.
+
+**The problem it exposed: `completions/clipped_ratio: 1`.** Every single completion hit the 512-token
+cap, and `completions/mean_terminated_length: 0` — *none* terminated naturally. The policy emits its
+JSON block and then rambles to the cap without ever producing EOS. Two consequences:
+
+- The parse successes were **incidental** — a workflow that happened to appear before the truncation.
+- Rambling **cost the policy nothing**, so there is no gradient pressure toward terminating.
+
+**`stop_strings` does not fix it in TRL 1.9.2** (tried, not assumed):
+
+```
+ValueError: There are one or more stop strings ... but we could not locate a tokenizer.
+When generating with stop strings, you must pass the model's tokenizer to `generate`.
+```
+
+TRL does not forward its processing class into `generate`, so the knob is unusable from here. Left
+**off** rather than shipped as a default that breaks training. Next thing to try: `eos_token_id` in
+`generation_kwargs` — token *ids* need no tokenizer at generation time, only at setup. Worth fixing
+before 3.5, because a 100% clip rate means the reward signal is measuring the wrong thing.
 
 Watch the parse-failure reason codes as first-class metrics: a policy that stops emitting valid
 workflows is the first thing that goes wrong, and phase 0 showed the prompted conductor's entire

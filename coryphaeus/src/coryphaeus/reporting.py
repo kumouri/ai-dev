@@ -164,6 +164,125 @@ def render_verdict(summaries: list[ArmSummary]) -> str:
     return "\n".join(lines)
 
 
+@dataclass(slots=True)
+class OracleView:
+    """How much routing could *possibly* be worth in this pool.
+
+    Phase 0's negative result turned out to be mostly a pool property rather than a conductor one:
+    34% of questions were solved by no worker at all, so a perfect router capped only 7.3 points
+    above the best single worker. Running a routing experiment on a pool with no headroom cannot
+    succeed, and the failure looks like the conductor's fault. So measure the ceiling *first*.
+    """
+
+    n_questions: int
+    solved_by_someone: int
+    best_solo_arm: str
+    best_solo_correct: int
+    #: conductor arm → (routed to a worker that solved it, routed to one that did not)
+    routing: dict[str, tuple[int, int]]
+
+    @property
+    def ceiling(self) -> float:
+        return self.solved_by_someone / self.n_questions if self.n_questions else 0.0
+
+    @property
+    def best_solo_accuracy(self) -> float:
+        return self.best_solo_correct / self.n_questions if self.n_questions else 0.0
+
+    @property
+    def headroom(self) -> float:
+        """What perfect routing would add over just always using the best single worker."""
+        return self.ceiling - self.best_solo_accuracy
+
+    @property
+    def unsolvable(self) -> int:
+        return self.n_questions - self.solved_by_someone
+
+
+def oracle_ceiling(rollout_rows: list[dict]) -> OracleView | None:
+    """Compute the routing ceiling from solo arms, over the question set they share.
+
+    Returns ``None`` when there are fewer than two solo arms — with one worker there is nothing to
+    route between and no ceiling to speak of.
+    """
+    solo: dict[str, dict[str, dict]] = {}
+    conductors: dict[str, dict[str, dict]] = {}
+    for row in rollout_rows:
+        arm = row.get("arm", "")
+        question = row.get("question_id")
+        if question is None:
+            continue
+        target = solo if arm.startswith(SOLO_PREFIX) else conductors
+        target.setdefault(arm, {})[question] = row
+
+    if len(solo) < 2:
+        return None
+    # Restrict to questions every arm actually saw. Comparing across different slices is how an
+    # early-stopped run quietly produces a headline built from unequal samples.
+    sets = [set(v) for v in solo.values()] + [set(v) for v in conductors.values()]
+    common = set.intersection(*sets) if sets else set()
+    if not common:
+        return None
+
+    solved = sum(1 for q in common if any(rows[q].get("correct") for rows in solo.values()))
+    per_arm = {arm: sum(1 for q in common if rows[q].get("correct")) for arm, rows in solo.items()}
+    best_arm = max(per_arm, key=lambda a: per_arm[a])
+
+    routing: dict[str, tuple[int, int]] = {}
+    for arm, rows in conductors.items():
+        hit = miss = 0
+        for q in common:
+            winners = {
+                a[len(SOLO_PREFIX) :] for a, srows in solo.items() if srows[q].get("correct")
+            }
+            if not winners:
+                continue  # nothing to get right
+            chosen = (rows[q].get("workers_used") or [None])[0]
+            if chosen in winners:
+                hit += 1
+            else:
+                miss += 1
+        routing[arm] = (hit, miss)
+
+    return OracleView(
+        n_questions=len(common),
+        solved_by_someone=solved,
+        best_solo_arm=best_arm[len(SOLO_PREFIX) :],
+        best_solo_correct=per_arm[best_arm],
+        routing=routing,
+    )
+
+
+def render_oracle(view: OracleView | None) -> str:
+    """Say plainly whether routing can pay here at all."""
+    if view is None:
+        return "Oracle ceiling needs two or more solo arms over a shared question set."
+
+    lines = [
+        f"Oracle ceiling (n={view.n_questions} shared questions):",
+        f"  solved by no worker : {view.unsolvable} ({view.unsolvable / view.n_questions:.1%}) "
+        "— unreachable by any router",
+        f"  perfect router      : {view.ceiling:.1%}",
+        f"  best single worker  : {view.best_solo_accuracy:.1%} ({view.best_solo_arm})",
+        f"  ROUTING HEADROOM    : {view.headroom:+.1%}",
+    ]
+    if view.headroom < 0.10:
+        lines.append(
+            "  → Small. This pool's workers are too correlated for routing to pay much; a poor"
+        )
+        lines.append(
+            "    result here says more about the pool than about the conductor. Widen it first."
+        )
+    for arm, (hit, miss) in sorted(view.routing.items()):
+        total = hit + miss
+        label = arm[len(CONDUCTOR_PREFIX) :] if arm.startswith(CONDUCTOR_PREFIX) else arm
+        if total:
+            lines.append(
+                f"  {label}: routed {hit}/{total} ({hit / total:.1%}) to a worker that solved it"
+            )
+    return "\n".join(lines)
+
+
 def render_parse_failures(rollout_rows: list[dict], limit: int = 8) -> str:
     """Failure reasons, most common first. These are the training metrics phase 3 will watch."""
     counts: dict[str, int] = {}
