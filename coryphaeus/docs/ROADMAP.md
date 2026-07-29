@@ -130,8 +130,8 @@ the time, so the reading was 9.4 of 24 GiB free. Re-check once the card is quiet
 |---|---|---|
 | 3.1 | `train/dataset.py` — rows carrying prompt + gold + **the pool that prompt advertised** | ✅ |
 | 3.2 | `train/bridge.py` — async→sync reward seam, one `gather` per batch, explicit timeout | ✅ |
-| 3.3 | `train/grpo.py` — trainer config (pin TRL and read its installed signature first) | ⬜ |
-| 3.4 | 0.5B smoke: advantages non-degenerate, no NaNs, checkpoint written | ⬜ |
+| 3.3 | `train/grpo.py` + `scripts/train_grpo.py` — verified against **TRL 1.9.2** | ✅ |
+| 3.4 | 0.5B smoke: advantages non-degenerate, no NaNs, checkpoint written | ⬜ blocked on a free GPU |
 | 3.5 | Qwen2.5-1.5B real run on GSM8K train | ⬜ |
 | 3.6 | Evaluate with `run_baseline.py` unchanged, against the phase-0 table | ⬜ |
 
@@ -139,6 +139,29 @@ The reward path is **fully testable offline before a GPU is involved**: `train/`
 or TRL, and the fake pool covers batch ordering, per-item pools, malformed completions, and the
 timeout. The pool column is load-bearing — the prompt advertises a catalogue, so scoring must honour
 *that* catalogue or routing to a worker the conductor was never shown would be silently accepted.
+
+### What reading the installed TRL actually caught
+
+The plan said to pin TRL and read its real signature rather than trust a remembered API. Two things
+turned up that a hardcoded config would have hit an hour into a real run:
+
+1. **`max_prompt_length` does not exist in TRL 1.9.2.** Passing it raises on construction. (Prompts
+   here run 1141–1502 chars against a 32k context, so nothing needs truncating anyway.)
+2. **The generation batch must be a whole number of groups.**
+   `per_device_train_batch_size * gradient_accumulation_steps` must be divisible by
+   `num_generations`, or:
+   `ValueError: generation_batch_size (4) must be divisible by num_generations (3)`.
+   Hit for real with `--k 3`. `gradient_accumulation_steps` is now *derived* from `num_generations`
+   by default so any `k` is valid by construction, and an explicit conflicting value is **rejected
+   rather than quietly adjusted** — silently changing a number somebody chose is its own bug.
+
+Also worth knowing for later: TRL 1.9's `GRPOTrainer` exposes `rollout_func` and
+`environment_factory`. If owning generation as well as scoring turns out cleaner than the
+reward-function seam, that is the door.
+
+`--dry-run` now does everything except `trainer.train()` — including constructing the real
+`GRPOTrainer` — because construction is exactly where an API change surfaces. Current status against
+TRL 1.9.2: trainer builds, **no config setting dropped**.
 
 Watch the parse-failure reason codes as first-class metrics: a policy that stops emitting valid
 workflows is the first thing that goes wrong, and phase 0 showed the prompted conductor's entire
