@@ -131,68 +131,109 @@ async def run(args: argparse.Namespace) -> int:
 
     semaphore = asyncio.Semaphore(max(1, args.concurrency))
     started = time.perf_counter()
-    all_records: list[tuple[str, RolloutRecord]] = []
-
-    # Sweep arm-by-arm, not question-by-question. A local pool's total footprint usually exceeds
-    # VRAM, so round-robining models per question makes Ollama evict and reload on nearly every
-    # call — minutes of load time per question. Finishing one worker's whole slice before moving on
-    # keeps it resident. It changes nothing about the science and everything about the wall clock.
-    async def solo_sweep(name: str) -> list[tuple[str, RolloutRecord]]:
-        done = 0
-        out: list[tuple[str, RolloutRecord]] = []
-
-        async def one(question: Question) -> tuple[str, RolloutRecord]:
-            nonlocal done
-            async with semaphore:
-                record = await solo_arm(
-                    name, question, registry, governor, max_tokens=args.max_tokens
-                )
-                done += 1
-                print(f"  solo:{name} [{done}/{len(questions)}]", flush=True)
-                return record
-
-        out.extend(await asyncio.gather(*(one(q) for q in questions)))
-        return out
-
-    async def conductor_sweep(
-        name: str, policy: PromptedConductor
-    ) -> list[tuple[str, RolloutRecord]]:
-        done = 0
-        out: list[tuple[str, RolloutRecord]] = []
-
-        async def one(question: Question) -> list[tuple[str, RolloutRecord]]:
-            nonlocal done
-            async with semaphore:
-                group = await rollout_group(
-                    policy,
-                    registry,
-                    question,
-                    governor=governor,
-                    k=args.k,
-                    arm=f"conductor:{name}",
-                    self_worker=policy.worker,
-                    max_tokens=args.max_tokens,
-                )
-                done += 1
-                print(f"  conductor:{name} [{done}/{len(questions)}]", flush=True)
-                return [(record.arm, record) for record in group]
-
-        for batch in await asyncio.gather(*(one(q) for q in questions)):
-            out.extend(batch)
-        return out
-
-    if not args.no_solo:
-        for name in registry.names():
-            all_records.extend(await solo_sweep(name))
-    for name, policy in conductors.items():
-        all_records.extend(await conductor_sweep(name, policy))
-
-    elapsed = time.perf_counter() - started
+    rollout_rows: list[dict] = []
 
     with RunWriter.create(args.label) as writer:
-        run_id = writer.run_dir.name
+        run_dir = writer.run_dir
+        run_id = run_dir.name
+        # Meta first, so an interrupted run still says what it was trying to do.
         writer.write_meta(
             run_id=run_id,
+            status="running",
+            dataset=args.dataset,
+            n_questions=len(questions),
+            pool=list(registry.names()),
+            catalog=registry.catalog_text(),
+            conductors={name: p.describe() for name, p in conductors.items()},
+            k=args.k,
+            solo_arms=not args.no_solo,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
+            concurrency=args.concurrency,
+        )
+        print(f"run dir   : {run_dir}\n")
+
+        def record_now(record: RolloutRecord) -> None:
+            """Persist a rollout the moment it finishes.
+
+            Buffering to the end would mean a run that dies at question 95 leaves nothing at all.
+            These runs are long enough that partial results are worth more than tidy code.
+            """
+            row = record.to_row(run_id=run_id)
+            rollout_rows.append(row)
+            writer.write_rollout(row)
+            if record.execution is not None:
+                for step_row in step_rows(
+                    run_id=run_id,
+                    question_id=record.question_id,
+                    arm=record.arm,
+                    rollout_index=record.rollout_index,
+                    execution=record.execution,
+                ):
+                    writer.write_step(step_row)
+
+        # Sweep arm-by-arm, not question-by-question. A local pool's total footprint usually exceeds
+        # VRAM, so round-robining models per question makes Ollama evict and reload on nearly every
+        # call — minutes of load time per question. Finishing one worker's whole slice before moving
+        # on keeps it resident: nothing about the science changes, everything about the clock does.
+        async def solo_sweep(name: str) -> None:
+            done = 0
+
+            async def one(question: Question) -> None:
+                nonlocal done
+                async with semaphore:
+                    _arm, record = await solo_arm(
+                        name, question, registry, governor, max_tokens=args.max_tokens
+                    )
+                    record_now(record)
+                    done += 1
+                    hits = sum(
+                        1 for r in rollout_rows if r["arm"] == f"solo:{name}" and r["correct"]
+                    )
+                    print(f"  solo:{name} [{done}/{len(questions)}] correct={hits}", flush=True)
+
+            await asyncio.gather(*(one(q) for q in questions))
+
+        async def conductor_sweep(name: str, policy: PromptedConductor) -> None:
+            done = 0
+            arm = f"conductor:{name}"
+
+            async def one(question: Question) -> None:
+                nonlocal done
+                async with semaphore:
+                    group = await rollout_group(
+                        policy,
+                        registry,
+                        question,
+                        governor=governor,
+                        k=args.k,
+                        arm=arm,
+                        self_worker=policy.worker,
+                        max_tokens=args.max_tokens,
+                    )
+                    for record in group:
+                        record_now(record)
+                    done += 1
+                    rows = [r for r in rollout_rows if r["arm"] == arm]
+                    hits = sum(1 for r in rows if r["correct"])
+                    bad = sum(1 for r in rows if r["parse_reason"])
+                    print(
+                        f"  {arm} [{done}/{len(questions)}] correct={hits} unparsed={bad}",
+                        flush=True,
+                    )
+
+            await asyncio.gather(*(one(q) for q in questions))
+
+        if not args.no_solo:
+            for name in registry.names():
+                await solo_sweep(name)
+        for name, policy in conductors.items():
+            await conductor_sweep(name, policy)
+
+        elapsed = time.perf_counter() - started
+        writer.write_meta(
+            run_id=run_id,
+            status="finished",
             dataset=args.dataset,
             n_questions=len(questions),
             pool=list(registry.names()),
@@ -206,21 +247,6 @@ async def run(args: argparse.Namespace) -> int:
             elapsed_s=round(elapsed, 2),
             busy_events=governor.busy_events,
         )
-        rollout_rows: list[dict] = []
-        for _arm, record in all_records:
-            row = record.to_row(run_id=run_id)
-            rollout_rows.append(row)
-            writer.write_rollout(row)
-            if record.execution is not None:
-                for step_row in step_rows(
-                    run_id=run_id,
-                    question_id=record.question_id,
-                    arm=record.arm,
-                    rollout_index=record.rollout_index,
-                    execution=record.execution,
-                ):
-                    writer.write_step(step_row)
-        run_dir = writer.run_dir
 
     summaries = summarize(rollout_rows)
     print(f"\n{render_table(summaries)}\n")
