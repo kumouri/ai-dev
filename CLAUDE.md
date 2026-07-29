@@ -78,6 +78,10 @@ uv run python coryphaeus/scripts/run_baseline.py --help
   returned as outcomes and not retried. See `docs/ROADMAP.md` → "infrastructure noise in the reward".
 - **`.gitignore` ignores any directory named `data/`**, at any depth. That is why the pinned manifest
   lives in `manifests/` — a `data/` directory inside the package would silently not be committed.
+- **Training needs `build-essential` + `python3-dev`, not the CUDA toolkit.** Triton JIT-compiles a C
+  shim at first use, so a missing `Python.h` fails the very first training step with a wall of CUDA
+  flags that reads like a driver problem. It isn't. `torch.cuda.is_available()` passes long before
+  anything asks Triton to compile, so it does not catch this — see `docs/ROADMAP.md` phase 2.
 - **A malformed workflow is a reward signal, not an exception.** Parse failures are recorded with a
   reason and scored zero. Never "helpfully" repair a workflow with a second model call — that
   launders the very error the policy needs to learn from.

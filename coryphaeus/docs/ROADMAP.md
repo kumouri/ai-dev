@@ -42,9 +42,55 @@ Stated plainly because the headline number means nothing without them:
 - **Verifier: the module's own sympy comparison**, with `math_verify` off (see `reward.py` for why —
   it reports `16 == 16*pi` on a bare non-LaTeX gold).
 
-### Result
+### Result — the prompted conductor loses, and the pool is most of the reason
 
-_Pending 0.12. The number goes here, whichever way it lands._
+**On the common 150-question set** (all arms scored on identical questions):
+
+| arm | accuracy | unparsed | accuracy on *parsed* | latency/q |
+|---|---|---|---|---|
+| `q9` (9B) | **58.7%** | — | 58.7% | 32.4 s |
+| `q4` (4B) | 55.3% | — | 55.3% | 25.2 s |
+| `q2` (2B) | 38.0% | — | 38.0% | 22.9 s |
+| **→ conductor** (`q4`) | 47.3% | 14.7% | **55.5%** | **19.0 s** |
+
+**Verdict: −11.3 points against the best single worker.** Held between −9 and −12 from n=50 onward.
+
+**Stopped early, and stated plainly:** the run was cut at 150–175 questions of a planned 400 to free
+the GPU for training. Early stopping is only corrupting when it is *favourable* — stopping because
+you like what you see. Here the constraint was hardware and the result runs **against** the
+conductor, so there is no selection pressure in the number's favour. The pre-registered n was 400;
+this is n=150. Arms had drifted to unequal counts (150/151/175/175) by the cut, hence the common-set
+comparison rather than a headline built from different slices.
+
+### The finding that matters more than the verdict
+
+Scoring every question against every worker gives an **oracle ceiling** — what a perfect router would
+score:
+
+- **51 of 150 questions (34%) were solved by no worker in the pool.** Ceiling = 99/150 = **66.0%**.
+- `q9` alone reaches **58.7%**. So the *entire* headroom available to perfect routing is **+7.3
+  points**.
+- Of the 99 solvable questions the conductor routed 70 to a worker that solved it (**70.7%**) and 29
+  to one that did not.
+
+So the negative result decomposes into three separate things, only one of which is about routing
+being hard:
+
+1. **Formatting (14.7%).** Unparsed rollouts score zero. On parsed rollouts it is 55.5% — level with
+   `q4`. This is what GRPO pressures directly.
+2. **Routing (worth ≤ +7.3 points here).** It split 63/63 between `q4` and `q9` when `q9` is the
+   better worker — shuffling rather than choosing. Real, and learnable.
+3. **The pool (worth far more).** A ceiling only 7.3 points above the best single worker means these
+   three same-family Qwen models are *too correlated for routing to pay*. No conductor, trained or
+   not, can win much here.
+
+(3) is the load-bearing one, and it is exactly what phase 1 addresses: the remote pool spans 7B–72B
+across two lineages **and includes a math specialist**, which should lift the ceiling substantially.
+Re-measuring the oracle ceiling on that pool is the first thing worth doing — a routing experiment on
+a pool with no headroom cannot succeed, and would look like a conductor failure.
+
+The conductor was also the **fastest** arm (19.0 s vs `q9`'s 32.4 s) by pushing work to cheaper
+models. The cost-efficiency half of the paper's result appears even where the accuracy half does not.
 
 ## Phase 1 — worker pool breadth 🚧
 
@@ -116,6 +162,22 @@ torch wheel bundles its own CUDA 13.0 runtime and reaches the driver through WSL
 carried the real risk it exists to warn about: installing a **driver** package inside WSL clobbers
 those passthrough stubs. Add the toolkit only if something genuinely needs `nvcc` (compiling
 flash-attn, some Unsloth paths) — not on principle.
+
+**But `python3-dev` *is* needed, which the above nearly hid.** The first training attempt died in
+Triton:
+
+```
+subprocess.CalledProcessError: ['/usr/bin/gcc', '/tmp/.../cuda_utils.c', ... -I/usr/include/python3.12]
+```
+
+Triton JIT-compiles a small C shim at first use, so it needs a C compiler **and Python's development
+headers**. Ubuntu ships `python3.12` without them. The misleading part is where it points: the command
+line is full of CUDA flags, so it reads as a CUDA/driver problem. It isn't — linking
+`-l:libcuda.so.1 -L/usr/lib/wsl/lib` by hand succeeds fine. The missing file is `Python.h`.
+
+So the honest environment list is: **`build-essential` + `python3-dev`**, no CUDA toolkit. Checking
+`torch.cuda.is_available()` does *not* catch this — that passes long before anything asks Triton to
+compile, which is why the failure landed at step 0 of training rather than during verification.
 
 Caches live inside the distro's ext4 (`~/.cache/huggingface`, `~/.cache/uv`), not on a `/mnt` drvfs
 mount: drvfs is slow and breaks the hardlinks the HF cache relies on. The VHDX is already on the
