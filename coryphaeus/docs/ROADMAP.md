@@ -18,7 +18,7 @@ Everything the trainer will reuse, plus the number that justifies training at al
 | 0.8 | `rollout.py` — k-rollout groups + GRPO advantages | ✅ |
 | 0.9 | Dataset loaders (GSM8K, MATH500) + bundled offline fixture | ✅ |
 | 0.10 | `scripts/`: `smoke_workers`, `run_baseline`, `report` | ✅ |
-| 0.11 | **Re-read arXiv:2512.04388 and correct RESEARCH.md before freezing the reward** | ⬜ |
+| 0.11 | Verify arXiv:2512.04388 against RESEARCH.md — abstract done; full text before freezing the reward | 🚧 |
 | 0.12 | Run the slice; record the baseline number here | 🚧 |
 
 **Exit gate:** a report showing prompted-conductor vs best-single-worker accuracy, cost, latency and
@@ -48,10 +48,16 @@ _Pending 0.12. The number goes here, whichever way it lands._
 
 ## Phase 1 — worker pool breadth ⬜
 
-Featherless workers wired and smoke-tested against the real unit throttle; a pool deliberately
-heterogeneous in size and speciality (routing cannot pay in a pool of near-identical workers). Fix
-the catalog text the conductor reads, and measure how much its wording moves the baseline — a
-prompt-sensitivity number worth having *before* the reward is frozen.
+Featherless workers wired and smoke-tested against the real unit throttle; `q27` and `g12` back in;
+a pool deliberately heterogeneous in size and speciality, because routing cannot pay in a pool of
+near-identical workers. Measure how much the catalog's *wording* moves the baseline — a
+prompt-sensitivity number worth having before the reward is frozen.
+
+**Randomised pools, from the paper's abstract.** It trains over randomised agent pools, which is how
+its conductor generalises to arbitrary worker sets. So a conductor measured on one fixed pool has
+learned that pool, not routing — evaluation needs held-out pool compositions, not just held-out
+questions. That is a phase-1 change to the harness (sample the registry per rollout), and it is
+cheap to add now and expensive to retrofit after training starts.
 
 ## Phase 2 — training environment ⬜
 

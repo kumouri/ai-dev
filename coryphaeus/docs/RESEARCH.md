@@ -2,27 +2,43 @@
 
 ## The result being replicated
 
-**"Learning to Orchestrate Agents in Natural Language with the Conductor"** — Sakana AI, ICLR 2026,
-[arXiv:2512.04388](https://arxiv.org/abs/2512.04388) ([blog](https://sakana.ai/learning-to-orchestrate/)).
+**"Learning to Orchestrate Agents in Natural Language with the Conductor"** —
+[arXiv:2512.04388](https://arxiv.org/abs/2512.04388), Stefan Nielsen, Edoardo Cetin, Peter
+Schwendeman, Qi Sun, Jinglue Xu, Yujin Tang (Sakana AI; ICLR 2026,
+[blog](https://sakana.ai/learning-to-orchestrate/)).
 
-As reported:
+**Confirmed from the paper's own abstract** (verified 2026-07-29):
 
-- A **7B policy** (Qwen2.5-7B) trained with **GRPO** that answers nothing itself. It emits a
-  workflow: subtask text, the worker assigned to it, and which prior results that worker sees;
-  **≤5 steps**; it may assign **itself** as a worker, giving recursion.
-- Workers were GPT-5, Gemini 2.5 Pro, Claude Sonnet 4 and four open 27–32B models.
-- The 7B conductor beat **GPT-5 solo**: AIME25 93.3 vs 90.8, GPQA-Diamond 87.5 vs 82.3,
-  LiveCodeBench 83.9 vs 82.9 — at roughly **6× less cost** than heavyweight ensembles.
-- Training was small: **~960 questions, 200 GRPO iterations, 2×H100** (~160 GB for full-precision
-  7B GRPO at 64 rollouts per question). Their stated reason it works at 7B: leaning on powerful
-  workers sidesteps the exploration problem that usually strangles small-model RL.
-- Weights are not published; the productised version is their **Fugu** API. This repository is a
-  replication of the *recipe*, from the paper's description.
+- A **7B Conductor** trained with **reinforcement learning** that coordinates other LLMs rather than
+  answering itself. It learns two things at once: *targeted communication topologies* for
+  agent-to-agent collaboration, and *the instructions it writes* for each worker — "prompt
+  engineer focused instructions to the LLMs to maximally leverage their individual capabilities."
+- It "achieves significant performance gains **beyond any individual worker**", state of the art on
+  LiveCodeBench and GPQA. That phrasing is exactly the phase-0 hypothesis below, and the reason the
+  baseline arm here is *best single worker* rather than an average.
+- **Letting the Conductor select itself as a worker produces recursive topologies** — described as a
+  new form of dynamic test-time scaling through online iterative adaptation. Self-assignment is
+  therefore load-bearing, not a curiosity, and is supported from the first commit.
+- **Training uses randomised agent pools**, which is how it adapts to arbitrary open/closed worker
+  sets. Design implication taken up in phase 1: pool composition and the catalog text are
+  experimental variables, and a conductor evaluated only on one fixed pool has learned that pool.
 
-> **Provenance caveat, kept deliberately visible.** The figures above entered this repo from a
-> research summary written 2026-07-17, not from a close reading of the paper. They are load-bearing
-> for the reward design, so **the paper must be re-read before the reward is frozen** (P3 gate in
-> [ROADMAP.md](ROADMAP.md)). Anything below that turns out to differ gets corrected here first.
+**Still second-hand** — from a research summary written 2026-07-17 rather than the full text. Not
+contradicted by the abstract, but not verified either, and load-bearing for the reward:
+
+- GRPO specifically as the RL algorithm, and Qwen2.5-7B as the base.
+- The ≤5-step cap on workflows (adopted here as `MAX_STEPS`).
+- AIME25 93.3 vs GPT-5's 90.8, GPQA-Diamond 87.5 vs 82.3, LiveCodeBench 83.9 vs 82.9; ~6× less cost
+  than heavyweight ensembles.
+- ~960 training questions, 200 GRPO iterations, 2×H100 (~160 GB at 64 rollouts/question).
+- Workers: GPT-5, Gemini 2.5 Pro, Claude Sonnet 4, plus four open 27–32B models.
+- The claim that leaning on powerful workers sidesteps small-model RL's exploration problem.
+
+> **Read the full text before the reward is frozen** (gate 0.11 in [ROADMAP.md](ROADMAP.md)).
+> Anything above that turns out to differ gets corrected here first.
+
+Weights are not published; the productised version is their **Fugu** API. This repository replicates
+the *recipe* as described, using no code or weights from that work.
 
 ## What we add: a world model over workers
 
