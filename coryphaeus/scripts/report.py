@@ -69,10 +69,15 @@ def main(argv: list[str] | None = None) -> int:
     meta_path = run_dir / "meta.json"
     if meta_path.is_file():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        print(f"run     : {run_dir.name}")
-        print(f"dataset : {meta.get('dataset')} ({meta.get('n_questions')} questions)")
+        status = meta.get("status", "unknown")
+        elapsed = meta.get("elapsed_s")
+        # An unfinished run has no elapsed time yet. Say "in progress" rather than "Nones", and say
+        # it loudly — a partial slice is a legitimate thing to read, but not to quote as final.
+        timing = f"elapsed: {elapsed}s" if elapsed is not None else "IN PROGRESS — partial results"
+        print(f"run     : {run_dir.name}  [{status}]")
+        print(f"dataset : {meta.get('dataset')} ({meta.get('n_questions')} questions requested)")
         print(f"pool    : {', '.join(meta.get('pool') or [])}")
-        print(f"k       : {meta.get('k')}   elapsed: {meta.get('elapsed_s')}s")
+        print(f"k       : {meta.get('k')}   {timing}")
         print()
 
     rollout_rows = read_jsonl(run_dir / "rollouts.jsonl")
