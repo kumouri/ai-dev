@@ -73,7 +73,16 @@ async def main(argv: list[str] | None = None) -> int:
 
     registry = build(args)
     if not len(registry):
-        print("no workers configured for the selected pool(s)", file=sys.stderr)
+        print("no workers configured for the selected pool(s).", file=sys.stderr)
+        if args.featherless:
+            print(
+                "REMOTE_POOL in coryphaeus/pools.py is empty by default: model ids differ per "
+                "account, and a wrong id is a 404 discovered mid-run. Add entries from your "
+                "provider's catalogue.",
+                file=sys.stderr,
+            )
+        if args.models:
+            print(f"--models {args.models!r} may not match any worker name.", file=sys.stderr)
         return 2
 
     governor = registry.governor()

@@ -19,10 +19,28 @@ Everything the trainer will reuse, plus the number that justifies training at al
 | 0.9 | Dataset loaders (GSM8K, MATH500) + bundled offline fixture | ✅ |
 | 0.10 | `scripts/`: `smoke_workers`, `run_baseline`, `report` | ✅ |
 | 0.11 | **Re-read arXiv:2512.04388 and correct RESEARCH.md before freezing the reward** | ⬜ |
-| 0.12 | Run the 100-question slice; record the baseline number here | ⬜ |
+| 0.12 | Run the slice; record the baseline number here | 🚧 |
 
 **Exit gate:** a report showing prompted-conductor vs best-single-worker accuracy, cost, latency and
 tokens on a fixed slice — plus the answer to whether routing pays at all.
+
+### Run parameters, and what was cut
+
+Stated plainly because the headline number means nothing without them:
+
+- **MATH500, first 40 questions.** Not the 100 originally planned. Local inference on one 4090 runs
+  ~15–20 s per question per arm; four arms over 100 questions is several hours, and a smaller
+  *complete* comparison beats a larger partial one. The `--chunk` blocking means the number can be
+  re-read at any block boundary and the slice extended later without re-running what is done.
+- **Pool: `q2`, `q4`, `q9`** (2B / 4B / 9B). `q27` and `g12` were **left out**: together the full
+  five-model pool is ~35 GB against 24 GB of VRAM, and `g12` alone took 287 s on a cold load during
+  the smoke test. Excluding them makes the pool *less* heterogeneous, which if anything understates
+  routing's value — a strong-but-slow worker is exactly what a router should learn to save for hard
+  questions. Phase 1 puts them back.
+- **Conductor: `q4`, k=1, temperature 0.8, `max_tokens` 1024.** k=1 means no advantage signal; this
+  arm measures routing quality, not GRPO readiness.
+- **Verifier: the module's own sympy comparison**, with `math_verify` off (see `reward.py` for why —
+  it reports `16 == 16*pi` on a bare non-LaTeX gold).
 
 ### Result
 
