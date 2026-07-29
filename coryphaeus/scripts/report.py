@@ -30,7 +30,16 @@ def resolve_run_dir(args: argparse.Namespace) -> Path | None:
         return Path(args.run_dir)
     if args.latest:
         root = settings().runs_dir
-        candidates = sorted((p for p in root.glob("*") if p.is_dir()), reverse=True)
+        # Only directories that actually hold a run. Checkpoint directories live under the same root
+        # and sort after the timestamped ones, so a plain name sort picks the wrong thing.
+        candidates = sorted(
+            (
+                p
+                for p in root.glob("*")
+                if p.is_dir() and ((p / "rollouts.jsonl").is_file() or (p / "meta.json").is_file())
+            ),
+            reverse=True,
+        )
         return candidates[0] if candidates else None
     return None
 
@@ -74,10 +83,17 @@ def main(argv: list[str] | None = None) -> int:
         # An unfinished run has no elapsed time yet. Say "in progress" rather than "Nones", and say
         # it loudly — a partial slice is a legitimate thing to read, but not to quote as final.
         timing = f"elapsed: {elapsed}s" if elapsed is not None else "IN PROGRESS — partial results"
-        print(f"run     : {run_dir.name}  [{status}]")
-        print(f"dataset : {meta.get('dataset')} ({meta.get('n_questions')} questions requested)")
+        kind = meta.get("kind", "eval")
+        # Training runs carry different metadata than evaluation runs; print what is there rather
+        # than a row of Nones.
+        dataset = meta.get("dataset")
+        n = meta.get("n_questions") or (dataset.get("rows") if isinstance(dataset, dict) else None)
+        source = dataset if isinstance(dataset, str) else (meta.get("model") or "—")
+        k = meta.get("k") or meta.get("num_generations")
+        print(f"run     : {run_dir.name}  [{status}, {kind}]")
+        print(f"source  : {source}" + (f" ({n} questions)" if n else ""))
         print(f"pool    : {', '.join(meta.get('pool') or [])}")
-        print(f"k       : {meta.get('k')}   {timing}")
+        print(f"k       : {k or '—'}   {timing}")
         print()
 
     rollout_rows = read_jsonl(run_dir / "rollouts.jsonl")
