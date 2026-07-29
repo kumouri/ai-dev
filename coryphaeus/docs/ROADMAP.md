@@ -46,18 +46,57 @@ Stated plainly because the headline number means nothing without them:
 
 _Pending 0.12. The number goes here, whichever way it lands._
 
-## Phase 1 — worker pool breadth ⬜
+## Phase 1 — worker pool breadth 🚧
 
-Featherless workers wired and smoke-tested against the real unit throttle; `q27` and `g12` back in;
-a pool deliberately heterogeneous in size and speciality, because routing cannot pay in a pool of
-near-identical workers. Measure how much the catalog's *wording* moves the baseline — a
-prompt-sensitivity number worth having before the reward is frozen.
+| # | Item | Status |
+|---|---|---|
+| 1.1 | `WorkerRegistry.subset()` sharing worker objects | ✅ |
+| 1.2 | Deterministic `sample_pool()` + `sample_pool_split()` (held-out **compositions**) | ✅ |
+| 1.3 | Catalogue snapshot → pinned manifest with provider-reported units | ✅ |
+| 1.4 | Remote pool smoke-tested live | ✅ |
+| 1.5 | Catalog-wording sensitivity A/B | ⬜ |
+| 1.6 | `q27`/`g12` back in the local pool for a local heterogeneous arm | ⬜ |
 
 **Randomised pools, from the paper's abstract.** It trains over randomised agent pools, which is how
-its conductor generalises to arbitrary worker sets. So a conductor measured on one fixed pool has
-learned that pool, not routing — evaluation needs held-out pool compositions, not just held-out
-questions. That is a phase-1 change to the harness (sample the registry per rollout), and it is
-cheap to add now and expensive to retrofit after training starts.
+its conductor generalises to arbitrary worker sets. A conductor measured on one fixed pool has
+learned that pool, not routing — so evaluation needs held-out **pool compositions**, not only
+held-out questions. `sample_pool_split()` provides them, and refuses rather than silently returning
+fewer when the registry is too small to supply distinct ones (quietly returning fewer would make a
+leak look like a pass).
+
+### What the live catalogue taught us (2026-07-29)
+
+Probing the account beat guessing, three times over:
+
+1. **Units are published per model** (`concurrency_cost`), and the real distribution has four tiers.
+   The 24–32B band costs **2**, where `units_for_params` guessed 4 — over-reserving on exactly the
+   mid-size workers a router most wants. The heuristic is now a documented fallback only.
+2. **Reasoning models are in the remote pool too.** `Qwen/Qwen3-32B` spent 256 tokens thinking and
+   answered **25 instead of 42** — a truncated, plausible, *wrong* answer, which is worse than an
+   error because it scores as incompetence rather than misconfiguration.
+   `chat_template_kwargs={"enable_thinking": false}` fixes it: 6 tokens, correct.
+3. **A 4xx can be transient.** The provider returns `400 completion_error` for a generation that
+   failed on its side, and `503 capacity_exhausted` while a model spins up. Both must be retried,
+   not scored — see below.
+
+### Open design question: infrastructure noise in the reward
+
+Under GRPO a failed rollout scores zero, and zero is how the policy learns *"routing there was a bad
+choice."* So a provider hiccup is indistinguishable, to the gradient, from a genuinely poor routing
+decision. Transient failures are now retried rather than scored, which handles the common case — but
+across three consecutive smoke runs a *different* worker each time hit transient capacity, so on this
+provider these are frequent, not rare, and retries can still be exhausted.
+
+The honest options, none of them yet chosen:
+
+- **Raise `max_retries` for training runs** (cheap, partial).
+- **Record `infra_failed` in telemetry and measure the rate** before deciding anything — the right
+  first step, since the size of the problem is currently unknown.
+- **Resample the question rather than score it** when a rollout failed infrastructurally. Correct in
+  principle, but it changes what a training batch *is*, so it is a research decision and not a
+  silent fix.
+
+**Deliberately not decided here.** Measure first.
 
 ## Phase 2 — training environment ⬜
 

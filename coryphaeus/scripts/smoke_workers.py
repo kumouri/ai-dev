@@ -95,18 +95,34 @@ async def main(argv: list[str] | None = None) -> int:
     for worker in registry:
         result = await governor.invoke(worker, PROBE, max_tokens=args.max_tokens, temperature=0.0)
         answer = extract_answer(result.text) if result.ok else None
-        detail = answer if result.ok else (result.error or "unknown error")
         if not result.ok:
+            failures += 1
+            detail = result.error or "unknown error"
+        elif answer is not None:
+            detail = answer
+        elif (
+            result.meta.get("finish_reason") == "length"
+            or result.meta.get("done_reason") == "length"
+        ):
+            # A verbose model cut off mid-explanation. Say so: a bare "None" reads as "refused to
+            # answer", which sends you debugging the model instead of raising --max-tokens.
+            detail = f"(truncated at {args.max_tokens} tokens — no answer yet; raise --max-tokens)"
+            failures += 1
+        else:
+            detail = "(responded, but no answer could be extracted)"
             failures += 1
         print(
             f"{worker.spec.name:14} {worker.spec.units:<6} {'yes' if result.ok else 'NO':4} "
             f"{result.latency_s:>7.2f}s  {result.tokens_in:>5}/{result.tokens_out:<6} "
-            f"{str(detail)[:40]}"
+            f"{str(detail)[:56]}"
         )
 
-    print(f"\n{len(registry) - failures}/{len(registry)} responded.")
+    print(f"\n{len(registry) - failures}/{len(registry)} usable.")
     if governor.busy_events:
-        print(f"{governor.busy_events} 429(s) were backed off — the unit budget is binding.")
+        print(
+            f"{governor.busy_events} transient failure(s) backed off and retried "
+            "(rate limit, capacity, or a failed generation) — not counted against the workers."
+        )
     return 1 if failures else 0
 
 
