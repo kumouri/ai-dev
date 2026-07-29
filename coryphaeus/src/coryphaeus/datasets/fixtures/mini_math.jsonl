@@ -1,0 +1,12 @@
+{"id": "mini-1", "question": "A shop sells pencils in packs of 12. If Dara buys 7 packs and gives away 19 pencils, how many pencils does she have left?", "answer": "65", "level": "easy"}
+{"id": "mini-2", "question": "What is the value of 3/4 + 1/6? Give your answer as a fraction in lowest terms.", "answer": "11/12", "level": "easy"}
+{"id": "mini-3", "question": "A train travels 240 km in 3 hours. At the same speed, how many kilometres does it travel in 7 hours?", "answer": "560", "level": "easy"}
+{"id": "mini-4", "question": "Solve for x: 5x - 7 = 3x + 11.", "answer": "9", "level": "easy"}
+{"id": "mini-5", "question": "What is the area of a circle with radius 4? Give an exact answer in terms of pi.", "answer": "16*pi", "level": "medium"}
+{"id": "mini-6", "question": "The length of a rectangle is 3 more than twice its width. Its perimeter is 42. What is its width?", "answer": "6", "level": "medium"}
+{"id": "mini-7", "question": "Simplify: sqrt(48).", "answer": "4*sqrt(3)", "level": "medium"}
+{"id": "mini-8", "question": "How many distinct three-letter arrangements can be made from the letters of the word LOGIC, with no letter repeated?", "answer": "60", "level": "medium"}
+{"id": "mini-9", "question": "A number is chosen at random from 1 to 30 inclusive. What is the probability that it is divisible by 4? Give your answer as a fraction in lowest terms.", "answer": "7/30", "level": "medium"}
+{"id": "mini-10", "question": "What is the sum of the first 20 positive even integers?", "answer": "420", "level": "medium"}
+{"id": "mini-11", "question": "If f(x) = 2x^2 - 3x + 1, what is f(-2)?", "answer": "15", "level": "medium"}
+{"id": "mini-12", "question": "Two dice are rolled. What is the probability that the sum is exactly 9? Give your answer as a fraction in lowest terms.", "answer": "1/9", "level": "hard"}

@@ -1,0 +1,33 @@
+[project]
+name = "coryphaeus"
+version = "0.1.0"
+description = "A small conductor LM that routes subtasks to a pool of workers instead of answering them."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+authors = [{ name = "Ceryce Armstrong" }]
+keywords = ["llm", "orchestration", "routing", "grpo", "reinforcement-learning"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "httpx>=0.27",
+    "sympy>=1.12",
+]
+
+[project.optional-dependencies]
+# Dataset loaders. Only needed to fetch GSM8K / MATH500; the offline suite uses bundled fixtures.
+data = ["datasets>=2.19"]
+# Optional stronger answer verifier. reward.py uses it when importable and falls back to its own
+# sympy comparison when not, so this extra is a bonus, never a requirement.
+verify = ["math-verify>=0.5"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/coryphaeus"]
