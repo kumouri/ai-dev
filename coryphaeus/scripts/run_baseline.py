@@ -50,6 +50,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--k", type=int, default=1, help="rollouts per question per conductor")
     parser.add_argument("--no-solo", action="store_true", help="skip the solo arms")
     parser.add_argument("--concurrency", type=int, default=2, help="questions in flight")
+    parser.add_argument(
+        "--chunk",
+        type=int,
+        default=25,
+        help="questions per block; every block boundary yields a complete cross-arm comparison "
+        "(0 = one block, fewest model reloads but no interim result)",
+    )
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=0.8, help="conductor sampling temp")
     parser.add_argument("--label", default="baseline", help="run directory suffix")
@@ -172,11 +179,16 @@ async def run(args: argparse.Namespace) -> int:
                 ):
                     writer.write_step(step_row)
 
-        # Sweep arm-by-arm, not question-by-question. A local pool's total footprint usually exceeds
-        # VRAM, so round-robining models per question makes Ollama evict and reload on nearly every
-        # call — minutes of load time per question. Finishing one worker's whole slice before moving
-        # on keeps it resident: nothing about the science changes, everything about the clock does.
-        async def solo_sweep(name: str) -> None:
+        # Sweep arm-by-arm *within a block of questions*, which resolves a real tension:
+        #
+        #   - Question-by-question round-robin thrashes a local pool. Total footprint usually
+        #     exceeds VRAM, so Ollama evicts and reloads on nearly every call.
+        #   - Whole-slice-per-arm avoids that, but a run interrupted halfway leaves ONE complete
+        #     arm and nothing to compare it against, which is worth nothing at all.
+        #
+        # Blocking gives both: model loads are bounded to (arms x blocks), and every block boundary
+        # has a complete comparison across all arms. Set --chunk 0 for one block per arm.
+        async def solo_sweep(name: str, batch: list[Question]) -> None:
             done = 0
 
             async def one(question: Question) -> None:
@@ -190,11 +202,13 @@ async def run(args: argparse.Namespace) -> int:
                     hits = sum(
                         1 for r in rollout_rows if r["arm"] == f"solo:{name}" and r["correct"]
                     )
-                    print(f"  solo:{name} [{done}/{len(questions)}] correct={hits}", flush=True)
+                    print(f"  solo:{name} [{done}/{len(batch)}] correct so far={hits}", flush=True)
 
-            await asyncio.gather(*(one(q) for q in questions))
+            await asyncio.gather(*(one(q) for q in batch))
 
-        async def conductor_sweep(name: str, policy: PromptedConductor) -> None:
+        async def conductor_sweep(
+            name: str, policy: PromptedConductor, batch: list[Question]
+        ) -> None:
             done = 0
             arm = f"conductor:{name}"
 
@@ -218,17 +232,27 @@ async def run(args: argparse.Namespace) -> int:
                     hits = sum(1 for r in rows if r["correct"])
                     bad = sum(1 for r in rows if r["parse_reason"])
                     print(
-                        f"  {arm} [{done}/{len(questions)}] correct={hits} unparsed={bad}",
+                        f"  {arm} [{done}/{len(batch)}] correct so far={hits} unparsed={bad}",
                         flush=True,
                     )
 
-            await asyncio.gather(*(one(q) for q in questions))
+            await asyncio.gather(*(one(q) for q in batch))
 
-        if not args.no_solo:
-            for name in registry.names():
-                await solo_sweep(name)
-        for name, policy in conductors.items():
-            await conductor_sweep(name, policy)
+        size = args.chunk if args.chunk > 0 else len(questions)
+        blocks = [questions[i : i + size] for i in range(0, len(questions), size)]
+        for block_index, batch in enumerate(blocks, start=1):
+            if len(blocks) > 1:
+                print(f"\n--- block {block_index}/{len(blocks)} ({len(batch)} questions) ---")
+            if not args.no_solo:
+                for name in registry.names():
+                    await solo_sweep(name, batch)
+            for name, policy in conductors.items():
+                await conductor_sweep(name, policy, batch)
+            if len(blocks) > 1 and block_index < len(blocks):
+                # An interim comparison at every boundary, so a run that has to be cut short has
+                # already answered the question on however many questions it got through.
+                print(f"\n{render_table(summarize(rollout_rows))}")
+                print(f"{render_verdict(summarize(rollout_rows))}\n")
 
         elapsed = time.perf_counter() - started
         writer.write_meta(
