@@ -195,8 +195,34 @@ the time, so the reading was 9.4 of 24 GiB free. Re-check once the card is quiet
 | 3.3 | `train/grpo.py` + `scripts/train_grpo.py` — verified against **TRL 1.9.2** | ✅ |
 | 3.4 | 0.5B smoke: advantages non-degenerate, no NaNs, checkpoint written | ✅ |
 | 3.4b | Fix 100% completion clipping before the real run | ⬜ |
-| 3.5 | Qwen2.5-1.5B real run on GSM8K train | ⬜ |
+| 3.5 | Qwen2.5-1.5B real run on GSM8K train — r2 in flight (200 steps) | 🚧 |
 | 3.6 | Evaluate with `run_baseline.py` unchanged, against the phase-0 table | ⬜ |
+
+### 3.5 post-mortem of run 1 — killed at step 3 of 1000, three separate causes
+
+The first 1.5B run was stopped after 2.7 hours with steps taking 9 → 22 → 35 *minutes* (ETA 415
+hours). The GPU held memory but sat idle — "deloaded" to the eye. Telemetry separated three causes:
+
+1. **VRAM squeeze at launch → WDDM spill.** The trainer needs ~12 GB; at launch only 13.7 GB was
+   truly free (desktop ambient + lingering allocations). Windows lets CUDA oversubscribe into shared
+   system memory instead of failing, so the model *loaded* — into a silent 10–30× slowdown. Step 1
+   was already 9 minutes; the run was born spilled, not degraded later. **Lesson: check free VRAM
+   against the trainer's need immediately before launch, and treat a slow step 1 as a kill signal,
+   not a warm-up.** r2 launched with 20.5 GB free and a step-time gate on the monitor.
+2. **The prompt advertised `self` but training wires no self-worker** — TRL owns the policy, so the
+   reward function cannot invoke it. 7/16 rollouts died `self_unavailable`: the policy was punished
+   for believing its own prompt. Fixed: training prompts render with `include_self=False`; the
+   prompted baseline keeps self-assignment (it *does* wire a self-worker, and recursion is the
+   paper's mechanism).
+3. **The math specialist was capacity-dead for the whole run** — 8/8 calls exhausted retries over
+   2.6 h, and Mistral-7B went to capacity when probed as a replacement. At this hour, only the
+   mainline Qwen instructs are dependably warm on this provider. The pinned pool is now the four
+   reliable workers (14B / 32B / qwen3-32B / 72B-eval-only); specialists come back when they can be
+   smoked warm, because **a dead worker feeds infra noise straight into the reward** — every rollout
+   that routes to it scores zero for reasons that have nothing to do with routing.
+
+Also sized honestly: even healthy, 1000 optimizer steps at ~1.5–2.5 min/step is 25–40 h. r2 runs
+**200 steps** — the paper's own iteration count — which is an overnight run.
 
 The reward path is **fully testable offline before a GPU is involved**: `train/` imports without torch
 or TRL, and the fake pool covers batch ordering, per-item pools, malformed completions, and the

@@ -23,9 +23,9 @@ Available workers:
 
 Rules:
 - At most {max_steps} steps.
-- Each step: a `subtask` (plain-language instruction for that worker), a `worker` (a name from the \
-list above, or "self" to handle it yourself), and `deps` (a list of earlier step numbers whose \
-results that worker should be shown; use [] for none).
+- Each step: a `subtask` (plain-language instruction for that worker), a `worker` ({worker_rule}), \
+and `deps` (a list of earlier step numbers whose results that worker should be shown; use [] for \
+none).
 - `deps` may only refer to EARLIER steps.
 - `final` is the number of the step whose output is the answer.
 - Steps are numbered 1, 2, 3... in the order you list them.
@@ -67,14 +67,36 @@ SOLO_TEMPLATE = """\
 Solve this. End your reply with the final answer in the form \\boxed{{answer}}."""
 
 
+#: The `worker` rule, with and without self-assignment. Which one a prompt gets must match what the
+#: harness can actually execute: the prompted baseline provides a self-worker (the conductor's own
+#: model), but during GRPO training there is none — TRL owns the policy and the reward function
+#: cannot invoke it. Advertising "self" there produced 7/16 rollouts dying `self_unavailable` in the
+#: first 1.5B run: the prompt promised a capability the harness could not deliver, and the policy
+#: was punished for believing it.
+WORKER_RULE_WITH_SELF = 'a name from the list above, or "self" to handle it yourself'
+WORKER_RULE_POOL_ONLY = "a name from the list above"
+
+
 def render_conductor_prompt(
-    question: str, catalog: str, *, max_steps: int, example_worker: str
+    question: str,
+    catalog: str,
+    *,
+    max_steps: int,
+    example_worker: str,
+    include_self: bool = True,
 ) -> str:
+    """Render the conductor prompt.
+
+    Args:
+        include_self: advertise self-assignment. Pass ``False`` whenever no self-worker will be
+            wired at execution time — a prompt must never offer a capability scoring will punish.
+    """
     return CONDUCTOR_TEMPLATE.format(
         catalog=catalog,
         question=question,
         max_steps=max_steps,
         example_worker=example_worker,
+        worker_rule=WORKER_RULE_WITH_SELF if include_self else WORKER_RULE_POOL_ONLY,
     )
 
 

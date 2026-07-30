@@ -89,6 +89,28 @@ def test_prompt_example_names_a_worker_from_this_pool(registry6, questions):
     assert all(('"d"' in ln or '"e"' in ln) for ln in example_lines)
 
 
+def test_training_prompt_never_advertises_self(registry6, questions):
+    """During training there is no self-worker, so offering "self" punishes the policy for
+    believing the prompt — 7/16 rollouts died `self_unavailable` in the first 1.5B run."""
+    row = build_row(questions[0], registry6, ("a", "b"))
+    assert '"self"' not in row.prompt_text
+
+
+def test_baseline_prompt_still_advertises_self(registry6, questions):
+    """The prompted baseline DOES wire a self-worker, so its prompt keeps the capability —
+    self-assignment is the paper's recursion mechanism, not a mistake."""
+    from coryphaeus.policy.prompts import render_conductor_prompt
+    from coryphaeus.schema import MAX_STEPS
+
+    prompt = render_conductor_prompt(
+        questions[0].text,
+        registry6.catalog_text(),
+        max_steps=MAX_STEPS,
+        example_worker="a",
+    )
+    assert '"self"' in prompt
+
+
 def test_fixed_pools_are_cycled_so_coverage_is_even(registry6, questions):
     pools = [("a", "b"), ("c", "d"), ("e", "f")]
     rows = build_rows(questions[:6], registry6, pools=pools)
