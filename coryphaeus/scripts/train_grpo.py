@@ -72,6 +72,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="resume from a checkpoint dir, or bare --resume for the newest one in "
         "--checkpoint-dir. A fault should cost one save interval, not the run.",
     )
+    parser.add_argument(
+        "--deadline-hours",
+        type=float,
+        default=0.0,
+        help="wall-clock budget; past it the trainer saves and stops at the next step boundary. "
+        "Step count is the ambition, the deadline is the promise. 0 = off.",
+    )
     return parser.parse_args(argv)
 
 
@@ -216,6 +223,11 @@ def main(argv: list[str] | None = None) -> int:
             trainer, fit = build_trainer(train_settings, to_hf_dataset(rows), reward_fn)
             if fit.dropped:
                 print(f"\nNOT applied by this TRL build: {', '.join(fit.dropped)}")
+            if args.deadline_hours > 0:
+                from coryphaeus.train.grpo import make_deadline_callback
+
+                trainer.add_callback(make_deadline_callback(args.deadline_hours))
+                print(f"deadline: {args.deadline_hours:.1f}h — will stop at a checkpoint")
             print(f"\ntraining {train_settings.model} — output {train_settings.output_dir}\n")
             trainer.train(resume_from_checkpoint=resume_from)
             trainer.save_model(str(train_settings.output_dir))
