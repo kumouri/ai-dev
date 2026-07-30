@@ -244,6 +244,46 @@ def build_trainer(settings: TrainSettings, dataset, reward_fn):
     return GRPOTrainer(**trainer_fit.accepted), fit
 
 
+def deadline_reached(started_monotonic: float, now_monotonic: float, budget_hours: float) -> bool:
+    """Pure decision: has the wall-clock budget elapsed? Kept separate so it is testable offline."""
+    if budget_hours <= 0:
+        return False
+    return (now_monotonic - started_monotonic) >= budget_hours * 3600.0
+
+
+def make_deadline_callback(budget_hours: float):
+    """A trainer callback that stops training gracefully when the budget elapses.
+
+    r4 was ~26 minutes from busting a 6-hour deadline when a CUDA fault got there first — the
+    budget was never going to fit and nothing enforced it. This makes the budget mechanical: at
+    the first step past the deadline the trainer saves and stops, so the run always ends at a
+    checkpoint instead of at whatever step the clock ran out arguing.
+
+    Step count becomes the *ambition*; the deadline is the *promise*.
+    """
+    import time
+
+    from transformers import TrainerCallback  # noqa: PLC0415 - train extra only
+
+    class DeadlineCallback(TrainerCallback):
+        def __init__(self) -> None:
+            self.started = time.monotonic()
+            self.budget_hours = budget_hours
+
+        def on_step_end(self, args, state, control, **kwargs):
+            if deadline_reached(self.started, time.monotonic(), self.budget_hours):
+                logger.warning(
+                    "deadline of %.1fh reached at step %s — saving and stopping gracefully",
+                    self.budget_hours,
+                    state.global_step,
+                )
+                control.should_save = True
+                control.should_training_stop = True
+            return control
+
+    return DeadlineCallback()
+
+
 def describe_environment() -> dict:
     """A record of what actually ran. Cheap, and the first thing you want when a run looks odd."""
     info: dict = {}
