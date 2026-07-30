@@ -260,6 +260,26 @@ classifies timeouts and mid-response connection drops as **transient** (`WorkerB
 retry), never as scored failures: a stopwatch must not hand out zeros. Median step ~80 s says the
 tail, not hardware, is the pacing lever.
 
+### The v2 refine's numbers, and what GSM8K turned out to be
+
+The 6-sample re-probe of the 153 unattempted v1 questions (2026-07-30):
+
+- **79 of 153 (52%) sit at ≥5/6 weak-worker pass rate** — *within the v1 "discriminative" set*.
+  Extrapolated to the full 800: the genuinely contested middle of GSM8K for this pool is roughly
+  **7%**. GSM8K is substantially saturated for 14B+ workers; r3/r4's dead steps were downstream of
+  that fact. Future training sets should draw from MATH-tier difficulty, where the middle is wide.
+- These pass rates are the **world model's first labels** — `P(success | worker, question)`
+  measured at n=6. The refine now persists every probed rate to a `.rates.jsonl` sidecar (kept or
+  not), so refilters never cost a re-probe again. The v2 pass discarded its excluded rates and
+  taught us that the hard way.
+- **A fencepost shipped in v2:** the band `(0.17, 0.83)` claimed "1–5 of 6" but excluded both
+  boundary shells (1/6 = 0.1667, 5/6 = 0.8333). The on-disk v2 set is therefore "2–4 of 6" plus the
+  33 measured-mixed — 59 questions total, *more* concentrated than intended rather than broken, and
+  the 5/6 exclusion is arguably correct (near-easy is the r4 failure mode). The corrected default
+  band is `(0.15, 0.70)` — "1–4 of 6", skewed hard on purpose — with regression tests pinning both
+  shells. The r5 gate arbitrates whether the 59 suffice; a FAIL triggers a refilter from the
+  sidecar (free) rather than a re-probe.
+
 **Checkpointing is now load-bearing:** `save_steps=10` (~≤80 min exposure), `save_total_limit=3`,
 `--resume [checkpoint]` wired to TRL's `resume_from_checkpoint`, and `--checkpoint-dir` pointed at
 native ext4 — 6–9 GB checkpoints over drvfs/9P are their own slow-motion incident. Dense
