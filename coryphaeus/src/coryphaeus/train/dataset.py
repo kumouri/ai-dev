@@ -63,11 +63,15 @@ class TrainRow:
 def build_row(question: Question, registry: WorkerRegistry, pool: Sequence[str]) -> TrainRow:
     """Render one row against a specific sub-pool, as a conversational prompt."""
     view = registry.subset(pool)
+    # include_self=False: during training there is no self-worker — TRL owns the policy, and the
+    # reward function cannot invoke it. In the first 1.5B run the prompt still advertised "self"
+    # and 7/16 rollouts died `self_unavailable`: punished for using a capability it was offered.
     prompt_text = render_conductor_prompt(
         question.text,
         view.catalog_text(),
         max_steps=MAX_STEPS,
         example_worker=view.names()[0],
+        include_self=False,
     )
     # Same system prompt the prompted-conductor baseline uses, so the trained policy is measured
     # against an arm that saw the same instructions.

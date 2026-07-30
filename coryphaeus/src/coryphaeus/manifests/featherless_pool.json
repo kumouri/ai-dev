@@ -1,19 +1,7 @@
 {
-  "pinned_at": "2026-07-29T22:21:03.925870+00:00",
+  "pinned_at": "2026-07-30T03:15:30.272709+00:00",
   "source": "featherless /v1/models (concurrency_cost is the provider's own number)",
   "workers": [
-    {
-      "name": "qwen25-math-7b",
-      "model": "Qwen/Qwen2.5-Math-7B-Instruct",
-      "model_class": "qwen25-7b",
-      "params_b": 7.0,
-      "units": 1,
-      "tags": [
-        "math",
-        "fast"
-      ],
-      "context_length": 32768
-    },
     {
       "name": "qwen25-14b",
       "model": "Qwen/Qwen2.5-14B-Instruct",
