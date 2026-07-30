@@ -185,6 +185,73 @@ async def test_a_transient_400_is_not_mistaken_for_a_rejected_kwarg():
     assert len(calls) == 1  # classified as transient on the first response, no kwarg retry
 
 
+async def test_a_timeout_is_transient_not_an_outcome():
+    """A stopwatch must not hand out zeros.
+
+    r3 measured a 63x per-call latency spread (median 7.6s, max 88.8s) with steps gated on the
+    slowest of 4 rollouts. The cap turns the tail into a retry — but scoring a timeout as failure
+    would teach the policy that a congested-but-correct worker is a bad routing choice.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("read timed out")
+
+    worker, client = _worker(handler)
+    async with client:
+        with pytest.raises(WorkerBusy, match="timed out"):
+            await worker.invoke("q")
+
+
+async def test_a_timeout_is_retried_by_the_governor_and_can_succeed():
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectTimeout("slow connect")
+        return httpx.Response(200, json=_completion("42"))
+
+    worker, client = _worker(handler)
+    governor = Governor(budgets={"featherless": 4}, sleeper=_no_sleep, base_delay=0.0, jitter=0.0)
+    async with client:
+        result = await governor.invoke(worker, "q")
+    assert result.ok
+    assert result.attempts == 2
+
+
+async def test_a_dropped_connection_is_transient():
+    """Observed live in r3: 'RemoteProtocolError: peer closed connection' — the provider hung up
+    mid-response. A property of the moment, not of the request."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.RemoteProtocolError("peer closed connection without sending complete message")
+
+    worker, client = _worker(handler)
+    async with client:
+        with pytest.raises(WorkerBusy, match="connection dropped"):
+            await worker.invoke("q")
+
+
+async def test_other_transport_failures_are_still_outcomes():
+    """A refused connection is not a timeout — do not launder every transport error into a retry."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    worker, client = _worker(handler)
+    async with client:
+        result = await worker.invoke("q")
+    assert not result.ok
+    assert "transport" in (result.error or "")
+
+
+def test_default_timeout_caps_the_observed_tail():
+    """60s ≈ 2.2x the observed p95 (27s), not p95 itself — over-tight caps triple retry pressure
+    on a 4-unit budget. The 89s outlier class is what this exists to cut."""
+    worker = FeatherlessWorker(SPEC, api_key="test-key")
+    assert worker._timeout == 60.0
+
+
 async def test_error_reason_survives_a_non_json_body():
     worker, client = _worker(lambda r: httpx.Response(500, text="upstream exploded"))
     async with client:

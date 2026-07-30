@@ -129,6 +129,17 @@ def test_report_to_is_empty_so_nothing_phones_home():
     assert TrainSettings().as_config_kwargs()["report_to"] == []
 
 
+def test_checkpoint_cadence_bounds_the_blast_radius():
+    """r3 lost 2 hours to a CUDA fault at step 17 with save_steps=50 and nothing on disk.
+
+    Every 10 steps ≈ ≤80 min exposure at measured pace, and save_total_limit keeps the training
+    volume from silently filling over a long run.
+    """
+    kwargs = TrainSettings().as_config_kwargs()
+    assert kwargs["save_steps"] <= 10
+    assert kwargs["save_total_limit"] is not None
+
+
 def test_policies_are_the_planned_ones():
     assert "0.5B" in SMOKE_POLICY
     assert "1.5B" in DEFAULT_POLICY
