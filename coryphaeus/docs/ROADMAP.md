@@ -195,7 +195,7 @@ the time, so the reading was 9.4 of 24 GiB free. Re-check once the card is quiet
 | 3.3 | `train/grpo.py` + `scripts/train_grpo.py` — verified against **TRL 1.9.2** | ✅ |
 | 3.4 | 0.5B smoke: advantages non-degenerate, no NaNs, checkpoint written | ✅ |
 | 3.4b | Fix 100% completion clipping before the real run | ⬜ |
-| 3.5 | Qwen2.5-1.5B real run on GSM8K train — r2 in flight (200 steps) | 🚧 |
+| 3.5 | Qwen2.5-1.5B real run — r4 (calibrated questions, hardened) | 🚧 |
 | 3.6 | Evaluate with `run_baseline.py` unchanged, against the phase-0 table | ⬜ |
 
 ### 3.5 post-mortem of run 1 — killed at step 3 of 1000, three separate causes
@@ -223,6 +223,48 @@ hours). The GPU held memory but sat idle — "deloaded" to the eye. Telemetry se
 
 Also sized honestly: even healthy, 1000 optimizer steps at ~1.5–2.5 min/step is 25–40 h. r2 runs
 **200 steps** — the paper's own iteration count — which is an overnight run.
+
+### 3.5 post-mortem of runs 2–3, and what r4 changes
+
+**r2** (stopped by hand): born into a squeezed card again — the torch cache high-water grew
+13.2 → 23.5 GB, pegged the card, and WDDM began paging (shared 0.77 → 2.02 GB). Step 3 spent
+~10 minutes on ~1 minute of GPU work while its rollout group's network wall was 53 s. Telemetry,
+not the progress bar, made that attribution possible.
+
+**r3** (the gc experiment): `garbage_collection_threshold:0.8` was added to fight exactly that
+cache high-water. The run was *healthy* for 17 steps — then died on
+`CUDA error: an illegal memory access` inside generation, with **no checkpoint** (`save_steps=50`
+meant 2 h of exposure). Prime suspect is the **combination** `expandable_segments` ×
+`garbage_collection_threshold`: this stack ran ~20+ steps across r1/r2/smokes with
+expandable_segments alone and never faulted; GC unmapping cached pages an unsynchronized kernel
+still references fits the fault, and CUDA reports async faults at sync points — which is why the
+traceback pointed at the sampling loop's stopping check rather than the true site. A 5–10-step
+discriminator run cannot separate the suspects (the fault needed 17 steps to fire), so r4 simply
+**drops gc_threshold** and controls pressure by eviction + headroom instead; if it faults again
+without gc, the verdict flips to the cu130 stack and the next move is a cu126 downgrade.
+
+**r3's more valuable finding: 40% of steps taught nothing.** `reward_std: 0` on 4/10 surviving
+steps — every rollout in the group scored identically, so the GRPO advantage was zero. The reward
+is binary and honest; the *questions* were the problem: one every worker solves (or none solves)
+contains no routing decision. TRL 1.9.2 has no dynamic-sampling knob (verified by introspection —
+`zero_std` appears in its source once, as the metric), so the fix is at the data layer:
+**`scripts/calibrate_questions.py`** probes each candidate with a weak and a strong worker and
+keeps the disagreements — the questions where *who you ask changes the outcome* — plus a small
+deterministic fraction of both-wrong ones as headroom. The probe rows double as world-model
+training data. Expected effect: unanimity from ~40% toward the low teens at unchanged k.
+
+**Latency tail, measured (n=146 calls):** median 7.6 s, p95 27 s, max 88.8 s — a 63× spread, and a
+step waits on the slowest of its 4 rollouts, so step time tracks the *max*. r4 caps per-call time
+at 60 s (~2.2× p95 — not p95 itself, which would triple retry pressure on a 4-unit budget) and
+classifies timeouts and mid-response connection drops as **transient** (`WorkerBusy` → governor
+retry), never as scored failures: a stopwatch must not hand out zeros. Median step ~80 s says the
+tail, not hardware, is the pacing lever.
+
+**Checkpointing is now load-bearing:** `save_steps=10` (~≤80 min exposure), `save_total_limit=3`,
+`--resume [checkpoint]` wired to TRL's `resume_from_checkpoint`, and `--checkpoint-dir` pointed at
+native ext4 — 6–9 GB checkpoints over drvfs/9P are their own slow-motion incident. Dense
+checkpoints convert step count from a commitment into a preference: run toward 200, read the
+reward curve at 50/100, stop at any checkpoint without loss.
 
 The reward path is **fully testable offline before a GPU is involved**: `train/` imports without torch
 or TRL, and the fake pool covers batch ordering, per-item pools, malformed completions, and the

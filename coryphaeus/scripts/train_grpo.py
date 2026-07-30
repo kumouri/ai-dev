@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 from coryphaeus.config import settings
-from coryphaeus.datasets.loaders import load_gsm8k
+from coryphaeus.datasets.loaders import load_gsm8k, load_jsonl
 from coryphaeus.pools import build_remote_registry, sample_pool_split
 from coryphaeus.telemetry import RunWriter, step_rows
 from coryphaeus.train.bridge import RewardBridge, make_reward_fn
@@ -51,6 +51,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--label", default="grpo")
     parser.add_argument("--dry-run", action="store_true", help="build everything, train nothing")
+    parser.add_argument(
+        "--questions-file",
+        default="",
+        help="JSONL of calibrated questions (scripts/calibrate_questions.py). Without it, raw "
+        "GSM8K — where ~40%% of groups reached unanimity in r3 and taught nothing.",
+    )
+    parser.add_argument(
+        "--checkpoint-dir",
+        default="",
+        help="where checkpoints go. Point at native ext4 when training in WSL — 6-9 GB "
+        "checkpoints over drvfs/9P are their own slow-motion incident.",
+    )
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="latest",
+        default="",
+        metavar="CHECKPOINT",
+        help="resume from a checkpoint dir, or bare --resume for the newest one in "
+        "--checkpoint-dir. A fault should cost one save interval, not the run.",
+    )
     return parser.parse_args(argv)
 
 
@@ -91,23 +112,45 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     limit = 32 if args.smoke else args.limit
-    questions = load_gsm8k(split="train", limit=limit)
+    if args.questions_file:
+        questions = load_jsonl(args.questions_file, limit=limit, source="calibrated")
+        print(f"calibrated questions: {len(questions)} from {args.questions_file}")
+    else:
+        questions = load_gsm8k(split="train", limit=limit)
     rows = build_rows(questions, registry, pools=split.train, seed=args.seed)
 
     print(f"\npool         : {', '.join(registry.names())}")
     print(f"dataset      : {json.dumps(describe(rows), indent=2)}")
     print(f"eval pools   : {[list(p) for p in split.evaluation]} (held out)")
 
+    # Checkpoints live under their own subtree, not alongside experiment run records — otherwise
+    # `report.py --latest` finds a checkpoint directory instead of the last run.
+    checkpoint_root = (
+        Path(args.checkpoint_dir) if args.checkpoint_dir else Path(cfg.runs_dir) / "checkpoints"
+    )
     train_settings = TrainSettings(
         model=args.model or (SMOKE_POLICY if args.smoke else DEFAULT_POLICY),
-        # Checkpoints go under their own subtree, not alongside experiment run records — otherwise
-        # `report.py --latest` finds a checkpoint directory instead of the last run.
-        output_dir=Path(cfg.runs_dir)
-        / "checkpoints"
-        / f"{args.label}-{args.model or 'default'}".replace("/", "_"),
+        output_dir=checkpoint_root / f"{args.label}-{args.model or 'default'}".replace("/", "_"),
         num_generations=args.k,
         max_steps=5 if args.smoke else args.max_steps,
     )
+
+    resume_from: str | None = None
+    if args.resume:
+        if args.resume != "latest":
+            resume_from = args.resume
+        else:
+            candidates = sorted(
+                train_settings.output_dir.glob("checkpoint-*"),
+                key=lambda p: int(p.name.split("-")[-1]) if p.name.split("-")[-1].isdigit() else -1,
+            )
+            if not candidates:
+                print(
+                    f"--resume: no checkpoint-* under {train_settings.output_dir}", file=sys.stderr
+                )
+                return 2
+            resume_from = str(candidates[-1])
+        print(f"resuming from {resume_from}")
 
     # A dry run deliberately scores malformed completions, so its record would otherwise read as a
     # training run that got everything wrong. Name it for what it is.
@@ -174,7 +217,7 @@ def main(argv: list[str] | None = None) -> int:
             if fit.dropped:
                 print(f"\nNOT applied by this TRL build: {', '.join(fit.dropped)}")
             print(f"\ntraining {train_settings.model} — output {train_settings.output_dir}\n")
-            trainer.train()
+            trainer.train(resume_from_checkpoint=resume_from)
             trainer.save_model(str(train_settings.output_dir))
 
         writer.write_meta(

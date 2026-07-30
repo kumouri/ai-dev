@@ -70,10 +70,16 @@ class FeatherlessWorker:
         api_key: str | None = None,
         base_url: str | None = None,
         client: httpx.AsyncClient | None = None,
-        timeout: float = 300.0,
+        timeout: float = 60.0,
         think: bool | None = False,
     ) -> None:
         """Args:
+        timeout: per-call ceiling, deliberately ~2.2x the observed p95 (27s over n=146,
+            2026-07-30) rather than p95 itself. Tail latency is the pacing killer — one 89s call
+            stalls a whole 4-rollout group, and a step waits on its slowest rollout — but an
+            over-tight cap would triple retry pressure on a 4-unit budget and systematically
+            punish slow-but-correct workers. A timeout is raised as :class:`WorkerBusy`
+            (transient), never returned as an outcome: a stopwatch must not hand out zeros.
         think: ``False`` (default) sends ``chat_template_kwargs={"enable_thinking": False}``, so
             the token budget buys *answer* rather than reasoning. The remote pool has reasoning
             models in it too (``Qwen/Qwen3-32B``), and left enabled they burn the budget thinking
@@ -143,6 +149,16 @@ class FeatherlessWorker:
                 ):
                     payload.pop("chat_template_kwargs")
                     response = await self._post(payload)
+            except httpx.TimeoutException as exc:
+                # A slow call is a moment, not a verdict. Scoring it zero would teach the policy
+                # that routing to a congested-but-correct worker is a routing mistake.
+                raise WorkerBusy(
+                    f"{self.spec.name}: timed out after {t.elapsed:.0f}s ({type(exc).__name__})"
+                ) from exc
+            except httpx.RemoteProtocolError as exc:
+                # Observed live in r3: "peer closed connection" mid-response — the provider
+                # dropped us, not a property of the request. Same treatment as a timeout.
+                raise WorkerBusy(f"{self.spec.name}: connection dropped ({exc})") from exc
             except httpx.HTTPError as exc:
                 return WorkerResult(
                     worker=self.spec.name,

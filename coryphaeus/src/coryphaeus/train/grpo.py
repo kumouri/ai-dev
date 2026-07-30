@@ -72,7 +72,14 @@ class TrainSettings:
     #: card shared with nothing else that is still the difference between fitting and not.
     optim: str = "adamw_bnb_8bit"
     logging_steps: int = 1
-    save_steps: int = 50
+    #: Every 10 steps ≈ ≤80 min of exposure at measured pace. The previous default of 50 cost r3's
+    #: entire 2 hours when a CUDA fault landed at step 17 with nothing on disk. Checkpoint density
+    #: is what converts step count from a commitment into a preference: with cheap saves, "stop at
+    #: any checkpoint" is always a safe decision.
+    save_steps: int = 10
+    #: Keep the newest few (~6-9 GB each for 1.5B + 8-bit optimizer states). Unlimited retention
+    #: would quietly eat the training volume over a long run.
+    save_total_limit: int = 3
     seed: int = 0
     use_vllm: bool = False
     report_to: list[str] = field(default_factory=list)
@@ -144,6 +151,7 @@ class TrainSettings:
             "optim": self.optim,
             "logging_steps": self.logging_steps,
             "save_steps": self.save_steps,
+            "save_total_limit": self.save_total_limit,
             "seed": self.seed,
             "use_vllm": self.use_vllm,
             "report_to": self.report_to,
