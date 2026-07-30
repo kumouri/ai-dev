@@ -17,7 +17,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from ..datasets.loaders import Question
-from ..policy.prompts import PROMPT_VERSION, render_conductor_prompt
+from ..policy.prompts import CONDUCTOR_SYSTEM, PROMPT_VERSION, render_conductor_prompt
 from ..pools import sample_pool
 from ..schema import MAX_STEPS
 from ..workers.registry import WorkerRegistry
@@ -25,9 +25,26 @@ from ..workers.registry import WorkerRegistry
 
 @dataclass(frozen=True, slots=True)
 class TrainRow:
-    """One training example. ``to_dict`` is the shape a HF ``Dataset`` is built from."""
+    """One training example. ``to_dict`` is the shape a HF ``Dataset`` is built from.
 
-    prompt: str
+    The prompt is **conversational** — a list of chat messages, not a raw string. That is not a
+    stylistic choice; it fixes two real bugs found in the first smoke run:
+
+    1. **The policy never stopped generating.** ``clipped_ratio`` was 1.0 with
+       ``mean_terminated_length`` 0. A Qwen instruct model's EOS is ``<|im_end|>``, a *chat* token
+       it emits only when prompted through the chat template. Handed a bare string, TRL does raw
+       text continuation, so the model never terminates and rambles to the token cap. A
+       conversational prompt puts it in assistant mode and it stops on its own.
+       (The tempting fix — ``eos_token_id`` for the closing code fence — is actively wrong:
+       ``"```"`` is one token and ``"```json"`` begins with *that same token*, so it would stop
+       generation at the *opening* fence.)
+    2. **The system prompt never reached the policy.** The prompted-conductor baseline passes
+       ``CONDUCTOR_SYSTEM``; the training rows carried only the user text. The trained policy was
+       being shown a materially different prompt than the arm it is measured against.
+    """
+
+    messages: tuple[dict, ...]
+    prompt_text: str
     question: str
     question_id: str
     gold: str
@@ -35,7 +52,7 @@ class TrainRow:
 
     def to_dict(self) -> dict:
         return {
-            "prompt": self.prompt,
+            "prompt": [dict(m) for m in self.messages],
             "question": self.question,
             "question_id": self.question_id,
             "gold": self.gold,
@@ -44,17 +61,23 @@ class TrainRow:
 
 
 def build_row(question: Question, registry: WorkerRegistry, pool: Sequence[str]) -> TrainRow:
-    """Render one row against a specific sub-pool."""
+    """Render one row against a specific sub-pool, as a conversational prompt."""
     view = registry.subset(pool)
-    catalog = view.catalog_text()
-    example_worker = view.names()[0]
+    prompt_text = render_conductor_prompt(
+        question.text,
+        view.catalog_text(),
+        max_steps=MAX_STEPS,
+        example_worker=view.names()[0],
+    )
+    # Same system prompt the prompted-conductor baseline uses, so the trained policy is measured
+    # against an arm that saw the same instructions.
+    messages = (
+        {"role": "system", "content": CONDUCTOR_SYSTEM},
+        {"role": "user", "content": prompt_text},
+    )
     return TrainRow(
-        prompt=render_conductor_prompt(
-            question.text,
-            catalog,
-            max_steps=MAX_STEPS,
-            example_worker=example_worker,
-        ),
+        messages=messages,
+        prompt_text=prompt_text,
         question=question.text,
         question_id=question.id,
         gold=question.gold,
@@ -107,10 +130,11 @@ def describe(rows: Sequence[TrainRow]) -> dict:
     pool_counts: dict[tuple[str, ...], int] = {}
     for row in rows:
         pool_counts[row.pool] = pool_counts.get(row.pool, 0) + 1
-    prompt_chars = [len(row.prompt) for row in rows]
+    prompt_chars = [len(row.prompt_text) for row in rows]
     return {
         "rows": len(rows),
         "prompt_version": PROMPT_VERSION,
+        "conversational": all(row.messages for row in rows),
         "distinct_pools": len(pool_counts),
         "pool_counts": {"+".join(pool): count for pool, count in sorted(pool_counts.items())},
         "prompt_chars_min": min(prompt_chars) if prompt_chars else 0,
