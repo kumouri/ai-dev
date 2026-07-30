@@ -70,7 +70,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=6,
         help="probes per unattempted question in --refine mode; 6 de-quantizes what 1 could not",
     )
-    parser.add_argument("--band", type=float, nargs=2, default=(0.17, 0.83), metavar=("LO", "HI"))
+    # Default keeps 1-4 successes of 6: the hard-contested shell (1/6) stays IN, the near-easy
+    # shell (5/6) stays OUT — r4's dead steps were the too-easy side. The margins matter: the v2
+    # run shipped with (0.17, 0.83), which silently excluded BOTH boundary shells because
+    # 1/6 = 0.1667 < 0.17 and 5/6 = 0.8333 > 0.83 — a fencepost the docstring contradicted.
+    parser.add_argument("--band", type=float, nargs=2, default=(0.15, 0.70), metavar=("LO", "HI"))
     return parser.parse_args(argv)
 
 
@@ -141,12 +145,21 @@ async def refine(args: argparse.Namespace) -> int:
         for row in kept_rows:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
+    # Persist EVERY probed rate, kept or not — refilters must never cost a re-probe again. (The v2
+    # pass discarded the rates of excluded questions, so correcting its band means re-paying ~55
+    # minutes of probes. Once was enough.)
+    rates_path = out.with_suffix(".rates.jsonl")
+    with rates_path.open("w", encoding="utf-8") as fh:
+        for row, p in results:
+            fh.write(json.dumps({"id": row["id"], "weak_pass_rate": p}) + "\n")
+
     rates = sorted(p for _, p in results)
-    print(f"\npass-rate distribution over re-probed (n={len(rates)}):")
-    for lo_b in (0.0, 0.17, 0.34, 0.51, 0.67, 0.84):
-        hi_b = lo_b + 0.16 if lo_b < 0.84 else 1.0
-        count = sum(1 for p in rates if lo_b <= p <= hi_b)
-        print(f"  [{lo_b:.2f}-{hi_b:.2f}]: {'#' * count} {count}")
+    print(f"\npass-rate distribution over re-probed (n={len(rates)}; all rates -> {rates_path}):")
+    # Bin by success COUNT: with n samples the reachable rates are exactly k/n, and float-range
+    # bins leave holes at those exact values — the v2 histogram summed to 103 of 153 this way.
+    for k in range(args.samples + 1):
+        count = sum(1 for p in rates if abs(p - k / args.samples) < 1e-9)
+        print(f"  {k}/{args.samples}: {'#' * count} {count}")
     print(
         f"\nkept {len(kept_rows)} = {len(measured_mixed)} measured-mixed + {len(banded)} banded "
         f"[{lo:.2f},{hi:.2f}]; wrote {out}"
