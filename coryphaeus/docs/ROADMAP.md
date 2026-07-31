@@ -346,6 +346,56 @@ or TRL, and the fake pool covers batch ordering, per-item pools, malformed compl
 timeout. The pool column is load-bearing — the prompt advertises a catalogue, so scoring must honour
 *that* catalogue or routing to a worker the conductor was never shown would be silently accepted.
 
+### The two-arm night (2026-07-31) — first trained OR-pool conductor, and a third corpus verdict
+
+The pool diversification (1.7) was immediately promoted into a **two-arm training experiment**:
+the same 500 MATH L3–5 questions, calibrated per pool, each arm gated and trained on its own kept
+set. Outcomes:
+
+- **OpenRouter arm: the first conductor ever trained on the OR pool.** v1 single-sample
+  calibration gate-FAILED at 25%; the 6-sample refine (115 kept) brought the gate to **15%
+  PASS**, and the full 200-step run trained to completion (~79 s/step, network-bound). Checkpoint
+  home; MATH500 eval pending.
+- **Featherless arm: corpus verdict, not a checkpoint.** Its v1 calibration (155 kept) gated at
+  **exactly 20% — FAIL** (a tie goes to not shipping), and the 6-sample refine then showed why:
+  **81% of its v1-kept questions are 5/6–6/6 for qwen25-14b** — only 33 genuinely contested
+  questions remain. Training 200 steps on 33 questions would be ~24 epochs of memorization, so
+  the arm was deliberately not relaunched. **MATH L3–5 is exhausted for the Featherless pool the
+  same way GSM8K was** — while the *same questions under the same filter* keep 115 for the OR
+  pool. That asymmetry is the served-system comparison's first headline.
+- **Single-sample probes overestimate disagreement, measured twice:** v1 said 62% contested for
+  the OR pair and 29% for the Featherless pair; 6-sample refinement converged both to ~30% and
+  ~7% respectively. Filter noise, not pool truth — the r5 lesson, now with numbers.
+
+The night's baseline work (same MATH500-400 slice as phase 0, all ledgered):
+
+- **phi-4@deepinfra bf16 is the pool flagship:** 70.5% solo at $0.03/400q, beating the 70B
+  (64.8%) at 2.5× cheaper — reproduced exactly across two runs.
+- **A token cap can manufacture incompetence:** both qwen3 seats burned ~1.1k tokens of
+  undisableable reasoning and scored 4.8%/12.2% under a 1024 cap; the per-seat
+  `max_tokens_floor` (2048) recovered them to 37.2%/41.8% — still truncating their hardest
+  chains, so more capability sits behind a higher floor. Easy smokes cannot catch this; only a
+  hard corpus can.
+- **Definitive oracle ceiling, floored: 78.5% vs phi-4's 70.5% = +8.0 routing headroom** —
+  thin, but better than GSM8K ever offered, and the pool's shape makes the routing question
+  concrete: *know when phi-4 fails*, plus the phase-2 cost term.
+- A prompted `llama31-8b` conductor routed 289/400 calls to phi-4 from the catalog text alone
+  (34.0% — parse failures and its own overhead eat the rest).
+
+Marketplace tuition, all pinned as code the same night (PRs #28–30): host forensics in
+`provisioned` events + `CORYPHAEUS_VAST_EXCLUDE` (a host that accepts rentals and never boots
+keeps a healthy reliability score); a `cuda_max_good` driver floor (a stale-driver host bills a
+full bootstrap before torch refuses it); and the provision timeout raised to 2700 s after seven
+"junk hosts" turned out to be honest cold image pulls guillotined at exactly the old 1500 s mark.
+
+**Known open issue — the post-payload pull can hang, twice observed.** Take 6's launcher hung
+after its payload finished (killed by hand, orphan-swept), and the OR arm's pull wedged for six
+hours *after transferring everything* — the wall-clock hard kill terminated the box, correctly
+but expensively (~$0.45 of idle), and the wrapper's rc=1 then triggered a redundant relaunch that
+had to be interrupted by hand (the SIGINT path terminated + settled both ledgers cleanly, which
+was good to see proven live). The pull needs its own timeout and a partial-pull-tolerant retry,
+so a wedged rsync costs minutes, not the remaining hard-kill window.
+
 ### What reading the installed TRL actually caught
 
 The plan said to pin TRL and read its real signature rather than trust a remembered API. Two things
