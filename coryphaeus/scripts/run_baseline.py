@@ -21,6 +21,7 @@ import asyncio
 import sys
 import time
 
+from coryphaeus.cloud.budget import BudgetExceeded
 from coryphaeus.datasets.loaders import Question, load_questions
 from coryphaeus.orchestrate import run_solo
 from coryphaeus.policy import PromptedConductor
@@ -28,6 +29,7 @@ from coryphaeus.pools import build_local_registry, build_remote_registry
 from coryphaeus.reporting import render_parse_failures, render_table, render_verdict, summarize
 from coryphaeus.reward import score_answer
 from coryphaeus.rollout import RolloutRecord, rollout_group
+from coryphaeus.spend import EST_TOKENS_IN, reserve_worst_case
 from coryphaeus.telemetry import RunWriter, step_rows
 from coryphaeus.workers import Governor, WorkerRegistry, make_fake_pool
 
@@ -39,9 +41,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--limit", type=int, default=20, help="questions to run")
     parser.add_argument("--local-only", action="store_true", help="local Ollama pool")
-    parser.add_argument("--remote", action="store_true", help="include the Featherless pool")
+    parser.add_argument("--remote", action="store_true", help="include the pinned remote pool")
     parser.add_argument("--fake", action="store_true", help="offline fake pool (no network)")
     parser.add_argument("--models", default="", help="limit the pool to these worker names")
+    parser.add_argument(
+        "--providers",
+        default="",
+        help="with --remote: comma-separated provider filter (featherless, openrouter). "
+        "Default: every provider in the manifest. Paid seats run inside a token-ledger "
+        "reservation either way.",
+    )
     parser.add_argument(
         "--conductor",
         default="",
@@ -65,6 +74,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def build_registry(args: argparse.Namespace, questions: list[Question]) -> WorkerRegistry:
     models = tuple(m.strip() for m in args.models.split(",") if m.strip()) or None
+    providers = tuple(p.strip() for p in args.providers.split(",") if p.strip()) or None
     if args.fake:
         return WorkerRegistry(make_fake_pool({q.text: q.gold for q in questions}))
     registry = WorkerRegistry()
@@ -72,9 +82,37 @@ def build_registry(args: argparse.Namespace, questions: list[Question]) -> Worke
         for worker in build_local_registry(models):
             registry.add(worker)
     if args.remote:
-        for worker in build_remote_registry(models):
+        for worker in build_remote_registry(models, providers=providers):
             registry.add(worker)
     return registry
+
+
+def worst_case_calls(
+    args: argparse.Namespace,
+    registry: WorkerRegistry,
+    conductor_names: tuple[str, ...],
+    n_questions: int,
+) -> dict[str, int]:
+    """Upper-bound call counts per worker, for the token reservation.
+
+    Solo arms are exact (one call per question per worker). Conductor arms cannot know their
+    routing in advance, so every workflow call is charged to the *priciest* seat in the pool and
+    every workflow is assumed to use the maximum five steps — a deliberate over-estimate; the
+    settle reports what actually happened.
+    """
+    calls: dict[str, int] = {}
+    if not args.no_solo:
+        for name in registry.names():
+            calls[name] = calls.get(name, 0) + n_questions
+    if conductor_names:
+        priciest = max(
+            registry.names(),
+            key=lambda n: registry.get(n).spec.cost(EST_TOKENS_IN, args.max_tokens),
+        )
+        for name in conductor_names:
+            calls[name] = calls.get(name, 0) + n_questions * args.k
+            calls[priciest] = calls.get(priciest, 0) + n_questions * args.k * 5
+    return calls
 
 
 async def solo_arm(
@@ -122,13 +160,18 @@ async def run(args: argparse.Namespace) -> int:
         print("nothing to run: --no-solo with no --conductor", file=sys.stderr)
         return 2
 
-    governor = registry.governor()
-    conductors = {
-        name: PromptedConductor(
-            registry.get(name), governor, temperature=args.temperature, max_tokens=768
+    try:
+        ledger, reservation_id = reserve_worst_case(
+            registry,
+            worst_case_calls(args, registry, conductor_names, len(questions)),
+            args.max_tokens,
+            f"baseline-{args.label}",
         )
-        for name in conductor_names
-    }
+    except BudgetExceeded as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 3
+
+    governor = registry.governor()
 
     print(f"dataset      : {args.dataset} ({len(questions)} questions)")
     print(f"pool         : {', '.join(registry.names())}")
@@ -138,7 +181,36 @@ async def run(args: argparse.Namespace) -> int:
 
     semaphore = asyncio.Semaphore(max(1, args.concurrency))
     started = time.perf_counter()
+    # Shared with _run_arms so the settle sees whatever finished, even on a crash mid-arm —
+    # rows land here the moment each rollout completes.
     rollout_rows: list[dict] = []
+
+    try:
+        return await _run_arms(args, questions, registry, conductor_names, governor,
+                               semaphore, started, rollout_rows)  # fmt: skip
+    finally:
+        if ledger is not None and reservation_id is not None:
+            spent = round(sum(float(r.get("cost_usd") or 0.0) for r in rollout_rows), 6)
+            ledger.settle(reservation_id, spent, note="summed rollout cost_usd")
+            print(f"token ledger: settled {reservation_id} at ${spent:.4f}")
+
+
+async def _run_arms(
+    args: argparse.Namespace,
+    questions: list[Question],
+    registry: WorkerRegistry,
+    conductor_names: tuple[str, ...],
+    governor: Governor,
+    semaphore: asyncio.Semaphore,
+    started: float,
+    rollout_rows: list[dict],
+) -> int:
+    conductors = {
+        name: PromptedConductor(
+            registry.get(name), governor, temperature=args.temperature, max_tokens=768
+        )
+        for name in conductor_names
+    }
 
     with RunWriter.create(args.label) as writer:
         run_dir = writer.run_dir

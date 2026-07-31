@@ -30,23 +30,17 @@ import argparse
 import asyncio
 import json
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 
-from coryphaeus.cloud.budget import BudgetExceeded, BudgetLedger
-from coryphaeus.config import settings
+from coryphaeus.cloud.budget import BudgetExceeded
 from coryphaeus.datasets.loaders import Question, load_math_train, load_questions
 from coryphaeus.orchestrate import run_solo
 from coryphaeus.pools import build_remote_registry
 from coryphaeus.reward import score_answer
-from coryphaeus.spend import token_ledger
+from coryphaeus.spend import reserve_worst_case
 from coryphaeus.workers import WorkerRegistry
 from coryphaeus.workers.featherless import MissingApiKey as FeatherlessMissingKey
 from coryphaeus.workers.openrouter import MissingApiKey as OpenRouterMissingKey
-
-#: Worst-case prompt-side tokens per probe, for the reservation estimate. Generous on purpose —
-#: the reservation is the run's worst case, and an unsettled crash over-counts by design.
-EST_TOKENS_IN = 600
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -121,31 +115,6 @@ def build_probe_registry(args: argparse.Namespace) -> WorkerRegistry | None:
         return None
 
 
-def reserve_paid_probes(
-    registry: WorkerRegistry,
-    calls_by_worker: dict[str, int],
-    max_tokens: int,
-    out: Path,
-) -> tuple[BudgetLedger, str] | tuple[None, None]:
-    """Reserve the worst case for per-token probes; (None, None) when every probe is flat-rate.
-
-    Raises BudgetExceeded — deliberately uncaught into a refusal at the call site — when the
-    estimate would pass the monthly token ceiling.
-    """
-    estimate = sum(
-        registry.get(name).spec.cost(EST_TOKENS_IN, max_tokens) * n
-        for name, n in calls_by_worker.items()
-    )
-    if not estimate:
-        return None, None
-    ledger = token_ledger(settings().runs_dir)
-    reservation_id = f"{out.stem}-{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
-    detail = ", ".join(f"{n}x {name}" for name, n in calls_by_worker.items())
-    ledger.reserve(reservation_id, estimate, note=f"calibration probes: {detail}")
-    print(f"token ledger: reserved ${estimate:.2f} worst-case ({detail}) as {reservation_id}")
-    return ledger, reservation_id
-
-
 async def refine(args: argparse.Namespace) -> int:
     """v2: keep measured-mixed, drop measured-unanimous, multi-sample the rest into a band."""
 
@@ -181,8 +150,8 @@ async def refine(args: argparse.Namespace) -> int:
         )
         return 2
     try:
-        ledger, reservation_id = reserve_paid_probes(
-            registry, {args.weak: len(todo) * args.samples}, args.max_tokens, Path(args.out)
+        ledger, reservation_id = reserve_worst_case(
+            registry, {args.weak: len(todo) * args.samples}, args.max_tokens, Path(args.out).stem
         )
     except BudgetExceeded as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
@@ -274,11 +243,11 @@ async def probe(args: argparse.Namespace) -> int:
         if args.levels:
             print("--levels only applies to math-train; ignoring", file=sys.stderr)
     try:
-        ledger, reservation_id = reserve_paid_probes(
+        ledger, reservation_id = reserve_worst_case(
             registry,
             {args.weak: len(questions), args.strong: len(questions)},
             args.max_tokens,
-            Path(args.out),
+            Path(args.out).stem,
         )
     except BudgetExceeded as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
