@@ -201,6 +201,14 @@ loosen `--max-price` by a few cents, drop `--min-vram` if you were above the pol
 the other provider, or wait for off-peak. This is a capacity drought, not a launcher bug — the
 same weather phase 3 observed on the worker provider.
 
+**"NVIDIA driver too old" on the very first training step.** The image's CUDA toolkit is not
+the constraint — the *host driver* is, and marketplace hosts run whatever driver they run. A
+host below the pinned torch's CUDA build passes every network/reliability floor, bills a full
+bootstrap (~50 minutes at rental rates, observed 2026-07-31), and then refuses in the first
+step. `offers()` now filters on Vast's `cuda_max_good` (floor `CORYPHAEUS_VAST_MIN_CUDA`,
+default 12.9); if this error still appears, the floor has drifted behind the torch pin — raise
+it in lockstep, not on a hunch.
+
 **A repeat offender in the cheap tier.** A host can *accept* the rental and never boot the
 image — pending until the provision timeout fires, sometimes for hours of retries in one night
 (2026-07-31: five straight failures, every one on a healthy-scoring host, because a reliability

@@ -181,7 +181,7 @@ VAST_OFFERS = {
             "verification": "verified",
             "rentable": True,
             "geolocation": "Sweden, SE",
-            "cuda_max_good": 12.8,
+            "cuda_max_good": 13.0,
         },
         {  # good but pricier — must sort after the one above
             "id": 18077391,
@@ -200,7 +200,7 @@ VAST_OFFERS = {
             "verification": "verified",
             "rentable": True,
             "geolocation": "Quebec, CA",
-            "cuda_max_good": 12.8,
+            "cuda_max_good": 13.0,
         },
         {  # cheapest of all, but residential DSL — the network floor exists for this host
             "id": 18070001,
@@ -276,6 +276,27 @@ VAST_OFFERS = {
             "verification": "verified",
             "rentable": True,
             "geolocation": "Oregon, US",
+            "cuda_max_good": 13.0,
+        },
+        {  # cheapest AND healthy on every floor the night of 2026-07-30 knew about — but the
+            # driver only speaks CUDA 12.8, so torch refuses it after a fully-billed bootstrap.
+            # The driver floor exists for this host.
+            "id": 18069000,
+            "gpu_name": "RTX 3090",
+            "num_gpus": 1,
+            "gpu_ram": 24564,
+            "dph_total": 0.15,
+            "dph_base": 0.12,
+            "min_bid": 0.07,
+            "inet_down": 890.0,
+            "inet_up": 610.0,
+            "inet_down_cost": 0.0,
+            "inet_up_cost": 0.001,
+            "storage_cost": 0.08,
+            "reliability2": 0.9961,
+            "verification": "verified",
+            "rentable": True,
+            "geolocation": "Lyon, FR",
             "cuda_max_good": 12.8,
         },
     ]
@@ -612,7 +633,8 @@ async def test_vast_offers_enforce_the_network_floors_client_side():
         offers = await provider.offers(min_vram_gb=24, max_price_per_hour=0.40)
 
     # Survivors sorted cheapest-first. The 0.19 DSL host (87 Mb/s), the 0.22 flapper (0.912
-    # reliability), the 8 GB card and the 0.55 over-ceiling card are all refused.
+    # reliability), the 8 GB card, the 0.55 over-ceiling card, and the 0.15 stale-driver host
+    # (cuda_max_good 12.8) are all refused.
     assert [o.offer_id for o in offers] == ["18077244", "18077391"]
     best = offers[0]
     assert best.vram_gb == 24  # 24564 MB rounds to the card class, not down to 23
@@ -642,6 +664,7 @@ async def test_vast_offers_send_the_documented_server_side_filters():
     assert query["num_gpus"] == {"eq": 1}
     # MB, with half a GB of tolerance for hosts reporting usable (not nameplate) VRAM.
     assert query["gpu_ram"] == {"gte": 24 * 1024 - 512}
+    assert query["cuda_max_good"] == {"gte": 12.9}
     assert query["dph_total"] == {"lte": 0.40}
     assert query["inet_down"] == {"gte": 200.0}
     assert query["reliability2"] == {"gte": 0.98}
@@ -661,6 +684,7 @@ async def test_vast_offers_drop_hosts_named_in_the_exclude_env(monkeypatch):
             "dph_total": price,
             "inet_down": 900.0,
             "reliability2": 0.995,
+            "cuda_max_good": 13.0,
             "host_id": host_id,
             "machine_id": machine_id,
         }
@@ -685,6 +709,27 @@ async def test_vast_offers_exclude_env_unset_changes_nothing(monkeypatch):
     async with client:
         offers = await provider.offers(min_vram_gb=24, max_price_per_hour=0.40)
     assert [o.offer_id for o in offers] == ["18077244", "18077391"]
+
+
+async def test_vast_offers_refuse_stale_driver_hosts_client_side():
+    """The 2026-07-31 lesson at $0.18: a host can pass every network/reliability floor and
+    still carry a driver too old for the pinned torch — discovered only after a fully-billed
+    bootstrap. The 18069000 row is that host: cheapest in the fixture, healthy everywhere,
+    cuda_max_good 12.8."""
+    provider, client = _vast(lambda r: httpx.Response(200, json=VAST_OFFERS))
+    async with client:
+        offers = await provider.offers(min_vram_gb=24, max_price_per_hour=0.40)
+    assert "18069000" not in [o.offer_id for o in offers]
+
+
+async def test_vast_min_cuda_env_override_admits_older_drivers(monkeypatch):
+    """The floor tracks torch's CUDA build, not a law of nature — when torch is pinned older,
+    the operator can lower the floor and the 12.8 host becomes the cheapest survivor."""
+    monkeypatch.setenv("CORYPHAEUS_VAST_MIN_CUDA", "12.5")
+    provider, client = _vast(lambda r: httpx.Response(200, json=VAST_OFFERS))
+    async with client:
+        offers = await provider.offers(min_vram_gb=24, max_price_per_hour=0.40)
+    assert [o.offer_id for o in offers][0] == "18069000"
 
 
 async def test_vast_provision_injects_env_and_returns_the_new_contract_id():
