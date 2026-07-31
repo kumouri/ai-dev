@@ -284,6 +284,35 @@ async def test_a_think_tag_quoted_mid_answer_is_not_stripped():
     assert result.meta["think_leak_stripped"] is False
 
 
+async def test_empty_content_beside_a_reasoning_field_is_a_named_failure():
+    """Some endpoints accept the disable knob, ignore it, and stream reasoning to a separate
+    message field — observed live (qwen3-14b@deepinfra, 2026-07-31; the 32B on the same host
+    honors the knob). When the budget dies before content, 'empty response' would hide the actual
+    fix (raise max_tokens), so the burn is named and metered. The tokens are billed either way."""
+    body = _completion("")
+    body["choices"][0]["message"]["reasoning"] = "Okay, let's see. The user is asking for 17+25…"
+    worker, client = _worker(lambda r: httpx.Response(200, json=body))
+    async with client:
+        result = await worker.invoke("q")
+    assert not result.ok
+    assert "reasoning field" in (result.error or "")
+    assert result.meta["reasoning_chars"] > 0
+    assert result.cost_usd > 0
+
+
+async def test_reasoning_beside_real_content_is_metered_not_failed():
+    """The same quirk at an adequate budget: content arrives after the burn. The call succeeds —
+    the burn is a cost property, recorded per call for the ledger and the world model."""
+    body = _completion("\\boxed{42}")
+    body["choices"][0]["message"]["reasoning"] = "step by step…"
+    worker, client = _worker(lambda r: httpx.Response(200, json=body))
+    async with client:
+        result = await worker.invoke("q")
+    assert result.ok
+    assert result.text == "\\boxed{42}"
+    assert result.meta["reasoning_chars"] > 0
+
+
 async def test_a_reasoning_rejecting_endpoint_is_retried_without_the_knob():
     """Same shape as the Featherless chat_template_kwargs retry: never lose a working worker to
     an optimisation."""

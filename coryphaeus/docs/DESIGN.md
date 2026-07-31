@@ -94,6 +94,11 @@ per-endpoint probes and carry three things a router-of-routers would otherwise h
 - **`quantization`** — recorded per seat (policy: bf16 preferred, fp8 allowed). Pass rates are
   properties of the *served system*, so a seat change is a recalibration, and it must be visible
   in this file's diff.
+- **`think`** — the reasoning knob is seat data too: `false` sends the disable field; `null`
+  omits it, because an upstream with no reasoning control under `require_parameters` 404s the
+  entire seat ("No endpoints found"). And an endpoint can accept the knob yet ignore it,
+  streaming billed reasoning to a separate field — metered per call (`meta.reasoning_chars`)
+  and named as the failure when it starves content, instead of a mute "empty response".
 
 The same principle in one sentence: **a worker is a served system, not a model name** — the
 manifest exists to make every property that affects behaviour part of the pin.

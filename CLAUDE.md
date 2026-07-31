@@ -81,7 +81,11 @@ uv run python coryphaeus/scripts/run_baseline.py --help
   `chat_template_kwargs={"enable_thinking": false}`, OpenRouter's `reasoning={"enabled": false}`).
   Left on with a modest token budget, a model burns the budget thinking and returns a truncated,
   plausible, **wrong** answer — which scores as incompetence rather than misconfiguration.
-  Observed both locally and remotely.
+  Observed both locally and remotely. On OpenRouter the knob itself is per-seat manifest data
+  (`think`): upstreams without reasoning control **404 the whole seat** if the field is sent
+  (`require_parameters` filters them), so non-reasoning seats carry `think: null` (= omit); and
+  an endpoint can *accept* the knob yet ignore it, streaming reasoning to a separate billed
+  field (qwen3-14b@deepinfra, live 2026-07-31) — recorded per call as `meta.reasoning_chars`.
 - **Transient failures must never be scored.** Under GRPO a failed rollout scores zero, and zero
   teaches the policy "that worker was a bad choice" — so a provider hiccup would be laundered into a
   routing lesson. `WorkerBusy` covers 429/502/503/504 **and** the provider's transient error codes,

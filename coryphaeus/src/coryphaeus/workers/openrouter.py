@@ -353,9 +353,17 @@ class OpenRouterWorker:
         choices = body.get("choices") or []
         text = ""
         finish_reason = None
+        reasoning_chars = 0
         if choices:
-            text = ((choices[0].get("message") or {}).get("content")) or ""
+            message = choices[0].get("message") or {}
+            text = message.get("content") or ""
             finish_reason = choices[0].get("finish_reason")
+            # Some endpoints ignore reasoning={"enabled": false} and stream their reasoning to a
+            # separate message field instead (observed live: qwen3-14b@deepinfra; the 32B on the
+            # same host honors the knob). The tokens are billed either way, so the burn is
+            # recorded per call — and an empty content alongside a fat reasoning field is a
+            # nameable failure, not an "empty response".
+            reasoning_chars = len(message.get("reasoning") or "")
         usage = body.get("usage") or {}
         tokens_in = int(usage.get("prompt_tokens") or 0)
         tokens_out = int(usage.get("completion_tokens") or 0)
@@ -367,6 +375,7 @@ class OpenRouterWorker:
             "finish_reason": finish_reason,
             "served_by": served_by,
             "think_leak_stripped": leaked,
+            "reasoning_chars": reasoning_chars,
         }
 
         # Provenance check. A response served by anyone other than the pin is a different served
@@ -400,6 +409,12 @@ class OpenRouterWorker:
                 error = (
                     "think leak consumed the response: reasoning was disabled but the model "
                     "returned only a <think> block"
+                )
+            elif reasoning_chars:
+                error = (
+                    f"reasoning consumed the budget: content is empty but {reasoning_chars} chars "
+                    "arrived in the reasoning field — this endpoint ignores the disable knob; "
+                    "raise max_tokens so the answer fits after the burn"
                 )
             else:
                 error = "empty response"

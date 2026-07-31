@@ -143,6 +143,9 @@ def _build_remote_worker(entry: dict, units: int):
                 tags=tuple(entry.get("tags") or ()),
             ),
             pin=pin if isinstance(pin, str) else tuple(pin),
+            # JSON null → None → the reasoning field is omitted: for upstreams with no reasoning
+            # control, sending it under require_parameters 404s the seat ("No endpoints found").
+            think=entry.get("think", False),
         )
     raise ValueError(f"{name}: unknown provider {provider!r} in the worker manifest")
 
