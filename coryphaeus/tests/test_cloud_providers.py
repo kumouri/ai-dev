@@ -868,7 +868,9 @@ async def test_vast_list_instances_returns_the_real_array_with_labels():
     async with client:
         instances = await provider.list_instances()
 
-    assert seen["call"] == "GET /api/v0/instances"
+    # v1, with the trailing slash: v0's list answers 410 `deprecated_endpoint` (observed live
+    # 2026-07-31), and bare paths 301 to their slash canonicals with HTML bodies.
+    assert seen["call"] == "GET /api/v1/instances/"
     assert [(i.instance_id, i.state) for i in instances] == [
         ("22913044", InstanceState.RUNNING),
         ("22801077", InstanceState.STOPPED),
@@ -1065,3 +1067,19 @@ async def test_vast_provision_2xx_with_garbage_says_reconcile_not_retry():
     async with client:
         with pytest.raises(ProviderError, match="reconcile"):
             await provider.provision(offer, image="img", env={}, volume_gb=10, label="coryphaeus-x")
+
+
+async def test_vast_describe_uses_the_trailing_slash_canonical_path():
+    """The bare path 301s to its slash canonical with an HTML body; a JSON client that does not
+    land on the canonical reads ten minutes of UNKNOWN and times out (lived it, 2026-07-31)."""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"instances": _vast_row(46343811, actual_status="running")})
+
+    provider, client = _vast(handler)
+    async with client:
+        instance = await provider.describe("46343811")
+    assert seen["path"] == "/api/v0/instances/46343811/"
+    assert instance.state is InstanceState.RUNNING

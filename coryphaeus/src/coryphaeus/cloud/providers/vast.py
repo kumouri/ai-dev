@@ -170,9 +170,14 @@ class VastProvider:
         }
 
     async def _send(self, method: str, url: str, *, json_body: dict | None) -> httpx.Response:
+        # follow_redirects: the API 301s bare paths to their trailing-slash canonicals with an
+        # HTML body a JSON client cannot use. Canonical paths avoid the round-trip; following is
+        # the belt for any path we got wrong. GETs only in practice — provision PUTs land direct.
         if self._client is not None:
-            return await self._client.request(method, url, json=json_body, headers=self._headers)
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            return await self._client.request(
+                method, url, json=json_body, headers=self._headers, follow_redirects=True
+            )
+        async with httpx.AsyncClient(timeout=self._timeout, follow_redirects=True) as client:
             return await client.request(method, url, json=json_body, headers=self._headers)
 
     async def _request(
@@ -192,7 +197,20 @@ class VastProvider:
         (list instances) rather than risk renting the offer twice. A transient status is safe
         everywhere: the server answered, so no contract was opened.
         """
-        url = f"{self.base_url}{path}"
+        return await self._request_absolute(
+            method, f"{self.base_url}{path}", json_body=json_body, idempotent=idempotent
+        )
+
+    async def _request_absolute(
+        self,
+        method: str,
+        url: str,
+        *,
+        json_body: dict | None = None,
+        idempotent: bool = True,
+    ) -> httpx.Response:
+        """Same retry loop, taking a full URL — the seam that lets ``list_instances`` reach the
+        v1 API while everything else stays on the configured v0 base."""
         failure = ""
         for attempt in range(self._attempts):
             if attempt:
@@ -202,7 +220,7 @@ class VastProvider:
             except (httpx.TimeoutException, httpx.RemoteProtocolError) as exc:
                 if not idempotent:
                     raise ProviderError(
-                        f"{self.name}: {method} {path} died in flight "
+                        f"{self.name}: {method} {url} died in flight "
                         f"({type(exc).__name__}) — a contract may exist on the far side; "
                         "list instances and reconcile before retrying"
                     ) from exc
@@ -212,15 +230,14 @@ class VastProvider:
                 # A refused connection is not a timeout — do not launder every transport error
                 # into a retry (same reasoning as the featherless adapter).
                 raise ProviderError(
-                    f"{self.name}: {method} {path} failed — {type(exc).__name__}: {exc}"
+                    f"{self.name}: {method} {url} failed — {type(exc).__name__}: {exc}"
                 ) from exc
             if response.status_code in TRANSIENT_STATUSES:
                 failure = f"http {response.status_code}: {_reason(response)}"
                 continue
             return response
         raise ProviderError(
-            f"{self.name}: {method} {path} still failing after {self._attempts} attempts "
-            f"— {failure}"
+            f"{self.name}: {method} {url} still failing after {self._attempts} attempts — {failure}"
         )
 
     async def offers(self, *, min_vram_gb: int, max_price_per_hour: float) -> Sequence[GpuOffer]:
@@ -353,7 +370,9 @@ class VastProvider:
         read as "stopped billing".
         """
         try:
-            response = await self._request("GET", f"/instances/{instance_id}")
+            # Trailing slash is CANONICAL: the bare path answers 301 with an HTML body, which a
+            # non-following client reads as ten minutes of UNKNOWN (lived it, 2026-07-31, $0.02).
+            response = await self._request("GET", f"/instances/{instance_id}/")
         except ProviderError as exc:
             return self._opaque(instance_id, InstanceState.UNKNOWN, str(exc))
         if response.status_code == 404:
@@ -387,7 +406,12 @@ class VastProvider:
         and "nothing there" are opposite answers, and the wrong one ends the search while a
         rental keeps billing.
         """
-        response = await self._request("GET", "/instances")
+        # The v0 list is DEAD — it answers 410 `deprecated_endpoint` pointing at v1 (observed
+        # live 2026-07-31, resolving this module's own earlier v0-vs-v1 uncertainty). The v1
+        # shape is verified: {"success": true, "instances": [...], "next_token": ...} — a real
+        # array under the same plural key show-instance overloads for a single object.
+        v1_base = self.base_url.replace("/api/v0", "/api/v1")
+        response = await self._request_absolute("GET", f"{v1_base}/instances/")
         if response.status_code >= 400:
             raise ProviderError(
                 f"{self.name}: listing instances failed — "
@@ -451,7 +475,7 @@ class VastProvider:
         only invoices show; the ledger treats this as a floor, not gospel.
         """
         try:
-            response = await self._request("GET", f"/instances/{instance_id}")
+            response = await self._request("GET", f"/instances/{instance_id}/")
         except ProviderError:
             return None
         if response.status_code >= 400:
