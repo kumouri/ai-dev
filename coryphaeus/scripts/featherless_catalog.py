@@ -124,7 +124,13 @@ def print_list(models: list[dict], top: int) -> None:
 
 
 def pin(models: list[dict], wanted: list[str], manifest_path: Path) -> int:
-    """Write a small, tracked manifest of chosen workers with catalogue-reported units."""
+    """Refresh the manifest's *featherless* seats with catalogue-reported units.
+
+    The manifest is shared across providers, so this merges: featherless entries are replaced by
+    the newly pinned set, every other provider's seats pass through untouched. Clobbering them
+    here would silently un-pin the OpenRouter upstream pins — a different served system by the
+    next run, with nothing in the diff of *this* provider to show for it.
+    """
     by_id = {str(m.get("id")): m for m in models}
     missing = [w for w in wanted if w not in by_id]
     if missing:
@@ -142,16 +148,28 @@ def pin(models: list[dict], wanted: list[str], manifest_path: Path) -> int:
             file=sys.stderr,
         )
 
+    existing: dict = {}
+    if manifest_path.is_file():
+        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+    kept = [
+        e
+        for e in existing.get("workers") or []
+        if e.get("provider", "featherless") != "featherless"
+    ]
+
     manifest = {
         "pinned_at": datetime.now(UTC).isoformat(),
-        "source": "featherless /v1/models (concurrency_cost is the provider's own number)",
-        "workers": entries,
+        "source": existing.get("source")
+        or "featherless /v1/models (concurrency_cost is the provider's own number)",
+        **({"notes": existing["notes"]} if existing.get("notes") else {}),
+        "workers": entries + kept,
     }
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-    print(f"pinned {len(entries)} worker(s) to {manifest_path}")
+    kept_note = f" (kept {len(kept)} non-featherless seat(s))" if kept else ""
+    print(f"pinned {len(entries)} featherless worker(s) to {manifest_path}{kept_note}")
     for e in entries:
         size = f"{e['params_b']:g}B" if e["params_b"] else "?"
         tags = ", ".join(e["tags"]) or "-"

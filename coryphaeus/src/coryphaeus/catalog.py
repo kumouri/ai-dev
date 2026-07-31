@@ -83,6 +83,7 @@ def manifest_entry(model: dict) -> dict:
     params_b = params_from_model_class(model_class)
     return {
         "name": short_name(model_id),
+        "provider": "featherless",
         "model": model_id,
         "model_class": model_class,
         "params_b": params_b,

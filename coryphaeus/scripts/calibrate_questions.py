@@ -15,8 +15,13 @@ world-model training data — this pass pre-builds the phase-5 dataset while it 
     uv run python coryphaeus/scripts/calibrate_questions.py --limit 800 \
         --out coryphaeus/runs/calibrated-gsm8k.jsonl
 
-Flat-rate remote calls; ~2 probes/question. Expect roughly half an hour for 800 questions at
-4 concurrency units.
+    # calibrate the OpenRouter seats only — the served-system comparison arm
+    uv run python coryphaeus/scripts/calibrate_questions.py --providers openrouter \
+        --weak or-llama31-8b --strong or-qwen3-32b --out coryphaeus/runs/calibrated-or.jsonl
+
+~2 probes/question. Featherless seats are flat-rate; OpenRouter seats are per-token, so paid
+probes run inside a token-ledger reservation (worst case reserved up front, actual settled after
+— see coryphaeus/spend.py). Expect roughly half an hour for 800 questions at 4 concurrency units.
 """
 
 from __future__ import annotations
@@ -25,13 +30,23 @@ import argparse
 import asyncio
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
+from coryphaeus.cloud.budget import BudgetExceeded, BudgetLedger
 from coryphaeus.config import settings
 from coryphaeus.datasets.loaders import Question, load_math_train, load_questions
 from coryphaeus.orchestrate import run_solo
 from coryphaeus.pools import build_remote_registry
 from coryphaeus.reward import score_answer
+from coryphaeus.spend import token_ledger
+from coryphaeus.workers import WorkerRegistry
+from coryphaeus.workers.featherless import MissingApiKey as FeatherlessMissingKey
+from coryphaeus.workers.openrouter import MissingApiKey as OpenRouterMissingKey
+
+#: Worst-case prompt-side tokens per probe, for the reservation estimate. Generous on purpose —
+#: the reservation is the run's worst case, and an unsettled crash over-counts by design.
+EST_TOKENS_IN = 600
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -86,15 +101,53 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # run shipped with (0.17, 0.83), which silently excluded BOTH boundary shells because
     # 1/6 = 0.1667 < 0.17 and 5/6 = 0.8333 > 0.83 — a fencepost the docstring contradicted.
     parser.add_argument("--band", type=float, nargs=2, default=(0.15, 0.70), metavar=("LO", "HI"))
+    parser.add_argument(
+        "--providers",
+        default="",
+        help="comma-separated provider filter (featherless, openrouter). Default: every provider "
+        "in the manifest — calibrate the pool the run will actually use; filter for "
+        "single-provider comparison arms.",
+    )
     return parser.parse_args(argv)
+
+
+def build_probe_registry(args: argparse.Namespace) -> WorkerRegistry | None:
+    """The probe pool, or None (with the reason printed) when a needed key is absent."""
+    providers = tuple(p.strip() for p in args.providers.split(",") if p.strip()) or None
+    try:
+        return build_remote_registry(max_units=2, providers=providers)
+    except (FeatherlessMissingKey, OpenRouterMissingKey) as exc:
+        print(f"{exc} (the probes are remote)", file=sys.stderr)
+        return None
+
+
+def reserve_paid_probes(
+    registry: WorkerRegistry,
+    calls_by_worker: dict[str, int],
+    max_tokens: int,
+    out: Path,
+) -> tuple[BudgetLedger, str] | tuple[None, None]:
+    """Reserve the worst case for per-token probes; (None, None) when every probe is flat-rate.
+
+    Raises BudgetExceeded — deliberately uncaught into a refusal at the call site — when the
+    estimate would pass the monthly token ceiling.
+    """
+    estimate = sum(
+        registry.get(name).spec.cost(EST_TOKENS_IN, max_tokens) * n
+        for name, n in calls_by_worker.items()
+    )
+    if not estimate:
+        return None, None
+    ledger = token_ledger(settings().runs_dir)
+    reservation_id = f"{out.stem}-{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
+    detail = ", ".join(f"{n}x {name}" for name, n in calls_by_worker.items())
+    ledger.reserve(reservation_id, estimate, note=f"calibration probes: {detail}")
+    print(f"token ledger: reserved ${estimate:.2f} worst-case ({detail}) as {reservation_id}")
+    return ledger, reservation_id
 
 
 async def refine(args: argparse.Namespace) -> int:
     """v2: keep measured-mixed, drop measured-unanimous, multi-sample the rest into a band."""
-    cfg = settings()
-    if not cfg.has_featherless:
-        print("FEATHERLESS_API_KEY is not set — the probes are remote.", file=sys.stderr)
-        return 2
 
     v1 = [json.loads(line) for line in Path(args.refine).open(encoding="utf-8") if line.strip()]
 
@@ -118,13 +171,29 @@ async def refine(args: argparse.Namespace) -> int:
     todo = [r for r in v1 if r["id"] not in measured_mixed and r["id"] not in measured_unanimous]
     print(f"re-probing {len(todo)} unattempted questions with n={args.samples} on {args.weak}")
 
-    registry = build_remote_registry(max_units=2)
+    registry = build_probe_registry(args)
+    if registry is None:
+        return 2
+    if args.weak not in registry:
+        print(
+            f"--weak {args.weak!r} is not in the probe pool ({', '.join(registry.names())})",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        ledger, reservation_id = reserve_paid_probes(
+            registry, {args.weak: len(todo) * args.samples}, args.max_tokens, Path(args.out)
+        )
+    except BudgetExceeded as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 3
     governor = registry.governor()
     semaphore = asyncio.Semaphore(max(1, args.concurrency))
     done = 0
+    spent = 0.0
 
     async def pass_rate(row: dict) -> tuple[dict, float]:
-        nonlocal done
+        nonlocal done, spent
         async with semaphore:
             question = Question(id=row["id"], text=row["question"], gold=row["answer"])
             hits = 0
@@ -135,6 +204,7 @@ async def refine(args: argparse.Namespace) -> int:
                     governor=governor,
                     max_tokens=args.max_tokens,
                 )
+                spent += execution.cost_usd
                 if score_answer(execution.final_text, question.gold).correct:
                     hits += 1
             done += 1
@@ -142,7 +212,12 @@ async def refine(args: argparse.Namespace) -> int:
                 print(f"  re-probed {done}/{len(todo)}", flush=True)
             return row, hits / args.samples
 
-    results = await asyncio.gather(*(pass_rate(r) for r in todo))
+    try:
+        results = await asyncio.gather(*(pass_rate(r) for r in todo))
+    finally:
+        if ledger is not None and reservation_id is not None:
+            ledger.settle(reservation_id, spent, note="summed probe cost_usd")
+            print(f"token ledger: settled {reservation_id} at ${spent:.4f}")
     lo, hi = args.band
     banded = [row for row, p in results if lo <= p <= hi]
 
@@ -180,16 +255,13 @@ async def refine(args: argparse.Namespace) -> int:
 
 
 async def probe(args: argparse.Namespace) -> int:
-    cfg = settings()
-    if not cfg.has_featherless:
-        print("FEATHERLESS_API_KEY is not set — the probes are remote.", file=sys.stderr)
+    registry = build_probe_registry(args)
+    if registry is None:
         return 2
-
-    registry = build_remote_registry(max_units=2)
     for name in (args.weak, args.strong):
         if name not in registry:
             print(
-                f"{name!r} is not in the pinned pool ({', '.join(registry.names())})",
+                f"{name!r} is not in the probe pool ({', '.join(registry.names())})",
                 file=sys.stderr,
             )
             return 2
@@ -201,18 +273,30 @@ async def probe(args: argparse.Namespace) -> int:
         questions = load_questions(args.dataset, limit=args.limit)
         if args.levels:
             print("--levels only applies to math-train; ignoring", file=sys.stderr)
+    try:
+        ledger, reservation_id = reserve_paid_probes(
+            registry,
+            {args.weak: len(questions), args.strong: len(questions)},
+            args.max_tokens,
+            Path(args.out),
+        )
+    except BudgetExceeded as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 3
     governor = registry.governor()
     semaphore = asyncio.Semaphore(max(1, args.concurrency))
     done = 0
+    spent = 0.0
 
     async def one(question: Question) -> dict:
-        nonlocal done
+        nonlocal done, spent
         async with semaphore:
             outcomes: dict[str, bool] = {}
             for name in (args.weak, args.strong):
                 execution = await run_solo(
                     registry.get(name), question.text, governor=governor, max_tokens=args.max_tokens
                 )
+                spent += execution.cost_usd
                 score = score_answer(execution.final_text, question.gold)
                 outcomes[name] = bool(score.correct)
             done += 1
@@ -225,7 +309,12 @@ async def probe(args: argparse.Namespace) -> int:
                 "probes": outcomes,
             }
 
-    rows = await asyncio.gather(*(one(q) for q in questions))
+    try:
+        rows = await asyncio.gather(*(one(q) for q in questions))
+    finally:
+        if ledger is not None and reservation_id is not None:
+            ledger.settle(reservation_id, spent, note="summed probe cost_usd")
+            print(f"token ledger: settled {reservation_id} at ${spent:.4f}")
 
     # Classify. Two probes give a coarse but honest signal:
     #   disagree        -> routing changes the outcome here: KEEP (the signal we exist to find)

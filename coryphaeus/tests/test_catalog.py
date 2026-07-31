@@ -105,6 +105,25 @@ def test_pinned_manifest_declares_units_for_every_worker():
     assert all(int(e.get("units", 0)) >= 1 for e in entries)
 
 
+def test_openrouter_seats_carry_pin_price_and_allowed_quantization():
+    """Every OpenRouter seat must say WHERE it runs, WHAT it costs, and HOW it is quantized.
+
+    The pin is what makes a calibration describe one served system; the prices are what feed the
+    token-spend ledger (a missing price makes a paid worker look free); and the quantization set is
+    the locked policy — bf16 preferred, fp8 allowed, int4-class seats excluded.
+    """
+    entries = [e for e in load_manifest() if e.get("provider") == "openrouter"]
+    if not entries:
+        pytest.skip("no openrouter seats pinned in this checkout")
+    for e in entries:
+        assert e.get("pin"), f"{e['name']}: unpinned openrouter seat"
+        assert e.get("price_in_per_m") is not None, f"{e['name']}: no input price"
+        assert e.get("price_out_per_m") is not None, f"{e['name']}: no output price"
+        assert e.get("quantization") in {"bf16", "fp16", "fp8"}, (
+            f"{e['name']}: quantization {e.get('quantization')!r} outside the allowed set"
+        )
+
+
 def test_training_pool_excludes_serializing_workers(monkeypatch):
     """max_units keeps the account able to run several rollouts at once.
 
@@ -114,6 +133,7 @@ def test_training_pool_excludes_serializing_workers(monkeypatch):
     if not entries:
         pytest.skip("no pinned manifest in this checkout")
     monkeypatch.setenv("FEATHERLESS_API_KEY", "test-key-not-used-offline")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-not-used-offline")
     from coryphaeus import config
 
     config.settings.cache_clear()

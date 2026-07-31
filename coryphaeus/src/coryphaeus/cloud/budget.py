@@ -53,16 +53,28 @@ def _month_of(stamp: str) -> str:
 class BudgetLedger:
     """Append-only spend journal with a monthly ceiling.
 
+    The class meters dollars, not GPUs — the cloud ledger (GPU rentals) and the token ledger
+    (per-token worker providers, see ``coryphaeus.spend``) are the same mechanism pointed at
+    different files with different env overrides.
+
     Args:
         path: the JSONL file. Lives under the run/telemetry tree by default — it is a *record*,
             not config, and it must survive any individual run directory being cleaned up.
-        ceiling_usd: monthly cap. Overridable via ``CORYPHAEUS_CLOUD_BUDGET_USD`` so a public
-            clone's default is conservative and a power user raises it in env, not code.
+        ceiling_usd: monthly cap. Overridable via ``env_var`` so a public clone's default is
+            conservative and a power user raises it in env, not code.
+        env_var: name of the environment variable consulted when ``ceiling_usd`` is not given.
     """
 
-    def __init__(self, path: Path, *, ceiling_usd: float | None = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        ceiling_usd: float | None = None,
+        env_var: str = "CORYPHAEUS_CLOUD_BUDGET_USD",
+    ) -> None:
         self.path = path
-        env_ceiling = os.environ.get("CORYPHAEUS_CLOUD_BUDGET_USD")
+        self.env_var = env_var
+        env_ceiling = os.environ.get(env_var)
         self.ceiling_usd = (
             ceiling_usd
             if ceiling_usd is not None
@@ -123,7 +135,7 @@ class BudgetLedger:
                 f"provisioning ~${estimated_usd:.2f} would pass the monthly ceiling: "
                 f"${spend.settled_usd:.2f} settled + ${spend.reserved_usd:.2f} reserved of "
                 f"${self.ceiling_usd:.2f} for {spend.month}; resets {resets:%Y-%m-%d}. Raise "
-                f"CORYPHAEUS_CLOUD_BUDGET_USD deliberately if this is intended."
+                f"{self.env_var} deliberately if this is intended."
             )
         self._append(
             {

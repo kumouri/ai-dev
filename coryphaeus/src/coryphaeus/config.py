@@ -22,6 +22,8 @@ MEMBER_ROOT = Path(__file__).resolve().parents[2]
 #: .env rather than in this default.
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 DEFAULT_FEATHERLESS_BASE_URL = "https://api.featherless.ai/v1"
+#: OpenRouter's OpenAI-compatible API root (verified July 2026). Note the path is /api/v1, not /v1.
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 #: RunPod REST v2 (verified July 2026). The older GraphQL API and the v1 REST API at
 #: rest.runpod.io both still answer, but v1's own docs carry a retirement notice — new
 #: integrations are pointed at v2. Overridable so tests and a future migration need no code edit.
@@ -68,6 +70,9 @@ class Settings:
     featherless_api_key: str | None
     featherless_base_url: str
     featherless_unit_budget: int
+    openrouter_api_key: str | None
+    openrouter_base_url: str
+    openrouter_unit_budget: int
     runpod_api_key: str | None
     runpod_base_url: str
     vast_api_key: str | None
@@ -78,6 +83,10 @@ class Settings:
     @property
     def has_featherless(self) -> bool:
         return bool(self.featherless_api_key)
+
+    @property
+    def has_openrouter(self) -> bool:
+        return bool(self.openrouter_api_key)
 
     @property
     def has_runpod(self) -> bool:
@@ -100,6 +109,14 @@ def settings() -> Settings:
             os.environ.get("FEATHERLESS_BASE_URL", "").strip() or DEFAULT_FEATHERLESS_BASE_URL
         ),
         featherless_unit_budget=_int_env("FEATHERLESS_UNIT_BUDGET", 4),
+        openrouter_api_key=os.environ.get("OPENROUTER_API_KEY", "").strip() or None,
+        openrouter_base_url=(
+            os.environ.get("OPENROUTER_BASE_URL", "").strip() or DEFAULT_OPENROUTER_BASE_URL
+        ),
+        # Account-wide in-flight cap, not a provider limit: OpenRouter meters spend per token, and
+        # the pinned upstreams take far more (DeepInfra: 200/model, verified July 2026). 16 is
+        # politeness plus a blast-radius bound on a runaway loop's parallelism.
+        openrouter_unit_budget=_int_env("OPENROUTER_UNIT_BUDGET", 16),
         runpod_api_key=os.environ.get("RUNPOD_API_KEY", "").strip() or None,
         runpod_base_url=os.environ.get("RUNPOD_BASE_URL", "").strip() or DEFAULT_RUNPOD_BASE_URL,
         # VAST_AI_API_KEY accepted as an alias: it is what Vast's own console copy-paste suggests,

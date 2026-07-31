@@ -45,7 +45,8 @@ class WorkerSpec:
     Args:
         name: registry key — the string the conductor writes in a workflow. Short and mnemonic.
         model: provider-side model identifier.
-        provider: ``"fake"`` | ``"ollama"`` | ``"featherless"``. Also the governor's pool key.
+        provider: ``"fake"`` | ``"ollama"`` | ``"featherless"`` | ``"openrouter"``. Also the
+            governor's pool key.
         params_b: parameter count in billions, shown in the catalog and used to derive units.
         units: concurrency units this worker consumes from its provider's budget.
         tags: capability hints shown to the conductor (e.g. ``("math", "fast")``).
