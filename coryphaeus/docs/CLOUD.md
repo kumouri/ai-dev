@@ -71,11 +71,23 @@ Do not hand-edit the ledger to "free up" budget. If the ceiling is genuinely wro
 `CORYPHAEUS_CLOUD_BUDGET_USD`; if a reservation looks stale after a crash, see
 [the orphan belt](#auto-terminate-and-the-orphan-belt) below.
 
+**Two ledgers when per-token workers are involved.** GPU rental settles on the cloud ledger
+above; rollouts routed to per-token seats (OpenRouter) spend money the box itself cannot meter,
+so the *launcher* brackets them on the separate token-spend ledger
+(`CORYPHAEUS_TOKEN_BUDGET_USD`, see `coryphaeus/spend.py`): worst case reserved before
+provisioning, actuals settled after the pull from the telemetry's own `cost_usd` receipts. Same
+append-only, over-count-on-crash rules. Both ledgers are **machine-local files** — launch all
+runs that share a month's budget from one machine, or count both ledgers when reading spend.
+
 ## The three chains
 
 `scripts/cloud_run.py` runs one of three presets end to end — provision, train, sync, terminate,
 settle, notify. Common flags: `--provider runpod|vast|fake`, `--min-vram`, `--max-price`,
-`--max-hours`, `--volume-gb`, `--dry-run`.
+`--max-hours`, `--volume-gb`, `--dry-run` — and `--worker-providers` (default `featherless`),
+which decides in one place both **which worker API keys ride the provider's env injection** and
+the `--providers` filter every train stage runs under. The box gets exactly the selected
+providers' keys: it cannot leak a secret it never held, and it cannot quietly train on a wider
+pool than the experiment declared.
 
 ### `--chain validate` — ≈ $1, and the first thing to run
 

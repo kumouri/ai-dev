@@ -11,7 +11,30 @@ from pathlib import Path
 import pytest
 
 from coryphaeus.cloud.budget import BudgetExceeded, BudgetLedger
-from coryphaeus.spend import TOKEN_LEDGER_FILENAME, sum_cost_usd, token_ledger
+from coryphaeus.spend import (
+    EST_TOKENS_IN,
+    TOKEN_LEDGER_FILENAME,
+    reserve_worst_case,
+    sum_cost_usd,
+    token_ledger,
+)
+from coryphaeus.workers.featherless import featherless_spec
+from coryphaeus.workers.openrouter import openrouter_spec
+
+
+class _Holder:
+    def __init__(self, spec):
+        self.spec = spec
+
+
+class _StubRegistry:
+    """Just enough registry for reserve_worst_case: get(name).spec.cost()."""
+
+    def __init__(self, *specs):
+        self._workers = {s.name: _Holder(s) for s in specs}
+
+    def get(self, name):
+        return self._workers[name]
 
 
 def write_jsonl(path: Path, rows: list) -> Path:
@@ -62,6 +85,32 @@ def test_token_and_cloud_ledgers_are_separate_files(tmp_path):
     tokens.reserve("cal-1", 49.0)  # would raise if the cloud reservation were visible here
     assert cloud.month_spend().total_usd == 49.0
     assert tokens.month_spend().total_usd == 49.0
+
+
+# --- the shared reservation helper ---------------------------------------------------------------
+
+
+def test_reserve_worst_case_prices_only_the_paid_workers(tmp_path):
+    """Free workers may appear in the call plan freely — their cost is zero, and pricing them
+    would inflate the reservation for nothing."""
+    registry = _StubRegistry(
+        featherless_spec("free", "x/free"),
+        openrouter_spec("paid", "x/paid", usd_per_mtok_in=1.0, usd_per_mtok_out=1.0),
+    )
+    ledger = token_ledger(tmp_path)
+    got_ledger, reservation_id = reserve_worst_case(
+        registry, {"free": 100, "paid": 10}, 1024, "unit-test", ledger=ledger
+    )
+    assert got_ledger is ledger and reservation_id is not None
+    expected = round(10 * (EST_TOKENS_IN * 1.0 + 1024 * 1.0) / 1_000_000, 4)
+    assert ledger.month_spend().reserved_usd == expected
+
+
+def test_reserve_worst_case_is_a_no_op_for_flat_rate_pools(tmp_path):
+    registry = _StubRegistry(featherless_spec("free", "x/free"))
+    ledger = token_ledger(tmp_path)
+    assert reserve_worst_case(registry, {"free": 500}, 1024, "x", ledger=ledger) == (None, None)
+    assert ledger.rows() == []
 
 
 # --- the settle source ---------------------------------------------------------------------------

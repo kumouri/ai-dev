@@ -39,6 +39,8 @@ from coryphaeus.cloud.launcher import (
 )
 from coryphaeus.cloud.providers.base import CloudProvider, Instance
 from coryphaeus.config import REPO_ROOT, settings
+from coryphaeus.pools import load_manifest
+from coryphaeus.spend import EST_TOKENS_IN, sum_cost_usd, token_ledger
 
 #: Where things live ON the box. /workspace because that is where the target providers mount the
 #: persistent volume — code, caches, and artifacts all survive a container restart there.
@@ -86,6 +88,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--k", type=int, default=4, help="rollouts per question")
     parser.add_argument("--steps", type=int, default=200, help="full-run optimizer steps")
     parser.add_argument("--gate-threshold", type=float, default=0.2)
+    parser.add_argument(
+        "--worker-providers",
+        default="featherless",
+        help="comma-separated worker providers the box will use (featherless, openrouter). The "
+        "launcher ships exactly these providers' API keys and passes the same list to every "
+        "train stage — the pool a box may use is exactly the pool it can authenticate to. "
+        "Per-token providers additionally get a worst-case token-ledger reservation, settled "
+        "from the pulled telemetry's own cost receipts.",
+    )
     parser.add_argument(
         "--image",
         default="",
@@ -182,11 +193,11 @@ def build_chain(args: argparse.Namespace, train_label: str) -> str:
     run = "uv run --no-sync python"
     questions = f" --questions-file {REMOTE_QUESTIONS}" if args.questions_file else ""
     checkpoints = f" --checkpoint-dir {REMOTE_RUNS_DIR}/checkpoints"
-    # The pool a box may use is exactly the providers whose keys ride provision(env=...) — today
-    # the launcher ships FEATHERLESS_API_KEY alone, so the chain says so. The manifest is
-    # multi-provider; an unfiltered registry build on the box would demand keys it must not have.
-    # When OpenRouter workers join cloud training, the pushed env and this filter move together.
-    providers = " --providers featherless"
+    # The pool a box may use is exactly the providers whose keys ride provision(env=...) — the
+    # same --worker-providers value drives the pushed env (see worker_env) and this filter, so
+    # they cannot drift apart. The manifest is multi-provider; an unfiltered registry build on
+    # the box would demand keys it must not have.
+    providers = f" --providers {args.worker_providers}"
 
     probe = (
         f"{run} coryphaeus/scripts/train_grpo.py --label {train_label} --k {args.k} "
@@ -209,6 +220,69 @@ def build_chain(args: argparse.Namespace, train_label: str) -> str:
         "validate": f"{probe} && {gate}",
         "full": f"{probe} && {gate} && {full}",
     }[args.chain]
+
+
+#: Worker provider name → (env var, Settings attribute). The single map both the key check and
+#: the pushed env draw from, so "which keys does the box get" has exactly one answer.
+WORKER_KEYS = {
+    "featherless": ("FEATHERLESS_API_KEY", "featherless_api_key"),
+    "openrouter": ("OPENROUTER_API_KEY", "openrouter_api_key"),
+}
+
+
+def parse_worker_providers(raw: str) -> tuple[str, ...]:
+    providers = tuple(p.strip() for p in raw.split(",") if p.strip())
+    unknown = set(providers) - set(WORKER_KEYS)
+    if not providers or unknown:
+        raise SystemExit(
+            f"--worker-providers must name at least one of {sorted(WORKER_KEYS)}; "
+            f"got {raw!r}" + (f" (unknown: {sorted(unknown)})" if unknown else "")
+        )
+    return providers
+
+
+def worker_env(cfg, providers: tuple[str, ...]) -> dict[str, str]:
+    """The worker API keys the box gets — exactly the selected providers', nothing more.
+
+    A missing key fails HERE, before a box is rented: a chain that would exit 2 at its first
+    registry build wastes minutes and cents. And an unselected provider's key is never pushed —
+    a box cannot leak a secret it never held.
+    """
+    env: dict[str, str] = {}
+    for provider in providers:
+        var, attr = WORKER_KEYS[provider]
+        value = getattr(cfg, attr) or ""
+        if not value:
+            raise SystemExit(
+                f"{var} is not set but --worker-providers includes {provider!r}. The chain "
+                "routes workers remotely; renting a box that will exit 2 at its first step "
+                "wastes minutes and cents."
+            )
+        env[var] = value
+    return env
+
+
+def token_reserve_usd(
+    entries: list[dict], *, chain: str, steps: int, k: int, providers: tuple[str, ...]
+) -> float:
+    """Worst-case token spend for a training chain, from the manifest's own pinned prices.
+
+    Every rollout is charged the maximum five workflow calls, each at the priciest selected
+    per-token seat, for every step of every stage in the chain (the probe's 20 plus the full
+    run's budget). Deliberately generous — the settle reports what the pulled telemetry says
+    actually happened. Flat-rate-only selections cost 0.
+    """
+    per_call = max(
+        (
+            (float(e["price_in_per_m"]) * EST_TOKENS_IN + float(e["price_out_per_m"]) * 1024)
+            / 1_000_000
+            for e in entries
+            if e.get("provider") in providers and e.get("price_out_per_m") is not None
+        ),
+        default=0.0,
+    )
+    steps_total = 20 + (steps if chain == "full" else 0)
+    return round(per_call * steps_total * k * 5, 4)
 
 
 def build_remote_command(*, repo_url: str, repo_ref: str, chain: str) -> str:
@@ -384,13 +458,8 @@ async def main(argv: list[str] | None = None) -> int:
         print("\ndry run: refusing to provision.")
         return 0
 
-    if not cfg.has_featherless:
-        print(
-            "FEATHERLESS_API_KEY is not set. The chain routes workers remotely; renting a box "
-            "that will exit 2 at its first step wastes minutes and cents.",
-            file=sys.stderr,
-        )
-        return 2
+    worker_providers = parse_worker_providers(args.worker_providers)
+    worker_keys = worker_env(cfg, worker_providers)
     image = args.image.strip() or os.environ.get("CORYPHAEUS_CLOUD_IMAGE", "").strip()
     if not image:
         print(
@@ -438,10 +507,10 @@ async def main(argv: list[str] | None = None) -> int:
         image=image,
         command=build_remote_command(repo_url=repo_url, repo_ref=repo_ref, chain=chain),
         label=label,
-        # The secret rides the provider's env injection — never the command line, never a file
-        # in this repo, never the events log.
+        # The secrets ride the provider's env injection — never the command line, never a file
+        # in this repo, never the events log. Exactly the selected providers' keys, no more.
         env={
-            "FEATHERLESS_API_KEY": cfg.featherless_api_key or "",
+            **worker_keys,
             "CORYPHAEUS_RUNS_DIR": REMOTE_RUNS_DIR,
             "HF_HOME": "/workspace/hf",
             "PUBLIC_KEY": ssh_public_key,
@@ -457,6 +526,26 @@ async def main(argv: list[str] | None = None) -> int:
     )
 
     notify = make_notify()
+
+    # Rollouts on the box spend per-token money the box cannot meter (the ledgers are local
+    # files). So the launcher brackets them: worst case reserved here, actuals settled below
+    # from the pulled telemetry's own cost_usd receipts. A crash between the two over-counts —
+    # the ledger's one allowed failure mode.
+    token_reserve = token_reserve_usd(
+        load_manifest(), chain=args.chain, steps=args.steps, k=args.k, providers=worker_providers
+    )
+    tokens = token_ledger(cfg.runs_dir)
+    if token_reserve:
+        try:
+            tokens.reserve(label, token_reserve, note=f"cloud {args.chain} rollouts, worst case")
+            print(f"token ledger: reserved ${token_reserve:.2f} worst-case as {label}")
+        except BudgetExceeded as exc:
+            print(f"\nlaunch refused (token budget): {exc}", file=sys.stderr)
+            if notify is not None:
+                with contextlib.suppress(Exception):
+                    await notify(f"[coryphaeus] {label}: token-budget-refused — {exc}")
+            return 1
+
     try:
         result = await launch(provider, spec, ledger, run_dir=run_dir, notify=notify)
     except (BudgetExceeded, LauncherError) as exc:
@@ -470,6 +559,14 @@ async def main(argv: list[str] | None = None) -> int:
             with contextlib.suppress(Exception):
                 await notify(f"[coryphaeus] {label}: budget-refused — {exc}")
         return 1
+    finally:
+        if token_reserve:
+            pulled = (
+                sorted(spec.artifact_dir.rglob("*.jsonl")) if spec.artifact_dir.is_dir() else []
+            )
+            spent = sum_cost_usd(pulled)
+            tokens.settle(label, spent, note=f"summed cost_usd over {len(pulled)} pulled file(s)")
+            print(f"token ledger: settled {label} at ${spent:.4f}")
 
     print(f"\ndone: exit {result.exit_code}, settled ${result.actual_usd:.2f}")
     print(f"artifacts: {spec.artifact_dir}")

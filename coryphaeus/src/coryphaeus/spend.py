@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .cloud.budget import BudgetLedger
@@ -28,6 +29,10 @@ TOKEN_BUDGET_ENV = "CORYPHAEUS_TOKEN_BUDGET_USD"
 #: ``budget.jsonl``, not inside any single run directory.
 TOKEN_LEDGER_FILENAME = "token-budget.jsonl"
 
+#: Worst-case prompt-side tokens per call, for reservation estimates. Generous on purpose — a
+#: reservation is a run's worst case, and an unsettled crash over-counts by design.
+EST_TOKENS_IN = 600
+
 
 def token_ledger(path: Path, *, ceiling_usd: float | None = None) -> BudgetLedger:
     """The token-spend ledger: a ``BudgetLedger`` under ``CORYPHAEUS_TOKEN_BUDGET_USD``.
@@ -37,6 +42,38 @@ def token_ledger(path: Path, *, ceiling_usd: float | None = None) -> BudgetLedge
     if path.suffix != ".jsonl":
         path = path / TOKEN_LEDGER_FILENAME
     return BudgetLedger(path, ceiling_usd=ceiling_usd, env_var=TOKEN_BUDGET_ENV)
+
+
+def reserve_worst_case(
+    registry,
+    calls_by_worker: dict[str, int],
+    max_tokens: int,
+    stem: str,
+    *,
+    ledger: BudgetLedger | None = None,
+) -> tuple[BudgetLedger, str] | tuple[None, None]:
+    """Reserve the worst case for a batch of per-token calls; (None, None) when all are flat-rate.
+
+    ``calls_by_worker`` maps registry worker names to their worst-case call counts — include the
+    free workers freely, their ``spec.cost`` is zero. Raises ``BudgetExceeded`` (deliberately
+    uncaught into a refusal at the call site) when the estimate would pass the monthly ceiling.
+    The caller settles with actuals; a crash before that leaves the reservation counting, which
+    is the failure mode that costs vigilance, never money.
+    """
+    from .config import settings
+
+    estimate = sum(
+        registry.get(name).spec.cost(EST_TOKENS_IN, max_tokens) * count
+        for name, count in calls_by_worker.items()
+    )
+    if not estimate:
+        return None, None
+    ledger = ledger if ledger is not None else token_ledger(settings().runs_dir)
+    reservation_id = f"{stem}-{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
+    detail = ", ".join(f"{count}x {name}" for name, count in sorted(calls_by_worker.items()))
+    ledger.reserve(reservation_id, estimate, note=f"worst case: {detail}")
+    print(f"token ledger: reserved ${estimate:.2f} worst-case ({detail}) as {reservation_id}")
+    return ledger, reservation_id
 
 
 def sum_cost_usd(paths: Iterable[Path]) -> float:
