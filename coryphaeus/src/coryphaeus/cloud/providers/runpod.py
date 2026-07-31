@@ -240,6 +240,12 @@ class RunPodProvider:
             # SSH is how the launcher reaches the box; declaring 22/tcp is what makes a public
             # mapping appear in runtime.ports for describe() to read back.
             "ports": ["22/tcp"],
+            # Container disk is MANDATORY in practice though not in the schema: the handler
+            # treats a body without `disk` as "no pod configuration parameters" and 400s the
+            # whole request (bisected live, 2026-07-31 — same payload with disk advances).
+            # 20 GB holds the image layers plus uv caches; training artifacts live on the
+            # persistent /workspace mount, not here.
+            "disk": 20,
         }
         if volume_gb:
             # A persistent volume at RunPod's conventional /workspace: checkpoints survive a

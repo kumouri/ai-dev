@@ -378,6 +378,10 @@ async def test_runpod_provision_sends_the_documented_body_with_env_injected():
     assert body["cloud"] == "COMMUNITY"
     assert body["mounts"] == {"persistent": {"size": 40, "path": "/workspace"}}
     assert "22/tcp" in body["ports"]
+    # `disk` is mandatory in practice though optional in the schema: a body without it 400s as
+    # "no pod configuration parameters" (bisected live 2026-07-31). This pin keeps it mandatory
+    # in our payload forever.
+    assert body["disk"] >= 10
     assert instance.instance_id == "k2h8xpod1"
     assert instance.state is InstanceState.PENDING
     assert instance.price_per_hour == 0.34
