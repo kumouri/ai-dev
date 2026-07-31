@@ -165,7 +165,10 @@ class LaunchSpec:
     #: kill can never let a run bill past what was reserved.
     max_hours: float = 8.0
     volume_gb: int = 30
-    provision_timeout_s: float = 600.0
+    #: 25 min, not 10: a ~10 GB image at the Vast backend's own 200 Mbps network floor is
+    #: ~6.5 min of transfer before extraction, and marketplace hosts pull cold more often than
+    #: not — two live 600s timeouts on pending boxes (2026-07-31, $0.02 each) sized this.
+    provision_timeout_s: float = 1500.0
     poll_interval_s: float = 10.0
     #: Where artifacts accumulate on the box (runs, checkpoints, telemetry).
     remote_artifact_dir: str = "/workspace/runs"
