@@ -67,9 +67,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--provision-timeout",
         type=float,
-        default=1500.0,
+        default=2700.0,
         help="seconds to wait for the box to reach RUNNING before terminating. Size it to the "
-        "image: ~10 GB over a marketplace link needs 15-25 min cold.",
+        "image: ~10 GB over a marketplace link needs 15-25 min cold — and at peak hours more. "
+        "2026-07-31: seven 'junk hosts' in one night all died at exactly the old 1500s mark, "
+        "i.e. honest cold pulls guillotined at 96%%; the two hosts that 'worked' were merely "
+        "warm. A pending box costs pennies per extra 10 minutes; a re-roll repeats the cold "
+        "pull from zero on a different host.",
     )
     parser.add_argument(
         "--chain",

@@ -201,6 +201,14 @@ loosen `--max-price` by a few cents, drop `--min-vram` if you were above the pol
 the other provider, or wait for off-peak. This is a capacity drought, not a launcher bug — the
 same weather phase 3 observed on the worker provider.
 
+**Before blaming hosts, check whether every death happened at exactly your timeout.** Seven
+"junk hosts" in one night (2026-07-31) all died pending at precisely the then-default 1500s —
+which is not what broken hosts look like, it is what honest cold image pulls look like when
+guillotined at 96%: ~10 GB at peak-hour registry speeds needs more than 25 minutes, and the
+"good" hosts were merely warm ones. A pending box costs pennies per extra ten minutes, while a
+re-roll repeats the cold pull from zero on a different cold host. The default is now 2700s;
+raise it before concluding the market is broken.
+
 **"NVIDIA driver too old" on the very first training step.** The image's CUDA toolkit is not
 the constraint — the *host driver* is, and marketplace hosts run whatever driver they run. A
 host below the pinned torch's CUDA build passes every network/reliability floor, bills a full
