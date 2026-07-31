@@ -187,6 +187,7 @@ class OpenRouterWorker:
         client: httpx.AsyncClient | None = None,
         timeout: float = 60.0,
         think: bool | None = False,
+        max_tokens_floor: int = 0,
     ) -> None:
         """Args:
         pin: upstream provider slug(s) this worker is locked to — **required**, no default. The
@@ -203,6 +204,9 @@ class OpenRouterWorker:
             incompetence. ``None`` omits the field: use it for a pinned endpoint that does not
             support reasoning control at all, because ``require_parameters`` would otherwise
             filter that endpoint out of routing entirely.
+        max_tokens_floor: raise any lower caller ``max_tokens`` to this. For seats whose
+            endpoint reasons regardless of the knob, a generic cap truncates before the answer;
+            the floor buys the burn *plus* the answer. 0 (default) = the caller's cap stands.
         """
         cfg = settings()
         key = api_key or cfg.openrouter_api_key
@@ -225,6 +229,7 @@ class OpenRouterWorker:
         self._client = client
         self._timeout = timeout
         self.think = think
+        self.max_tokens_floor = max(0, int(max_tokens_floor))
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -256,10 +261,16 @@ class OpenRouterWorker:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
+        # A token cap must not hand out zeros: a seat whose serving burns budget on reasoning the
+        # disable knob fails to stop (baseline 2026-07-31: both qwen3 seats ~1.1k tokens of burn
+        # on MATH-hard prompts) truncates before the answer under a generic cap and scores as
+        # incompetence. The floor is seat data — the burn is a property of the served system.
+        effective_max_tokens = max(max_tokens, self.max_tokens_floor)
+
         payload: dict = {
             "model": self.spec.model,
             "messages": messages,
-            "max_tokens": max_tokens,
+            "max_tokens": effective_max_tokens,
             "temperature": temperature,
             "stream": False,
             # The determinism contract, per request: only the pinned upstream(s) may serve, no

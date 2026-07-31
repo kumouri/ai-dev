@@ -300,6 +300,48 @@ async def test_empty_content_beside_a_reasoning_field_is_a_named_failure():
     assert result.cost_usd > 0
 
 
+async def test_max_tokens_floor_raises_a_lower_caller_cap():
+    """Baseline 2026-07-31: qwen3 seats burn ~1.1k tokens of reasoning on MATH-hard prompts
+    regardless of the disable knob, so a generic 1024 cap truncated them into 4.8-12.2% solo —
+    fake incompetence. The floor buys the burn plus the answer."""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.read()))
+        return httpx.Response(200, json=_completion("42"))
+
+    worker, client = _worker(handler, max_tokens_floor=2048)
+    async with client:
+        await worker.invoke("q", max_tokens=1024)
+    assert seen["max_tokens"] == 2048
+
+
+async def test_a_caller_cap_above_the_floor_stands():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.read()))
+        return httpx.Response(200, json=_completion("42"))
+
+    worker, client = _worker(handler, max_tokens_floor=2048)
+    async with client:
+        await worker.invoke("q", max_tokens=4096)
+    assert seen["max_tokens"] == 4096
+
+
+async def test_no_floor_leaves_the_caller_cap_alone():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.read()))
+        return httpx.Response(200, json=_completion("42"))
+
+    worker, client = _worker(handler)
+    async with client:
+        await worker.invoke("q", max_tokens=256)
+    assert seen["max_tokens"] == 256
+
+
 async def test_reasoning_beside_real_content_is_metered_not_failed():
     """The same quirk at an adequate budget: content arrives after the burn. The call succeeds —
     the burn is a cost property, recorded per call for the ledger and the world model."""
