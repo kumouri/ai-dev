@@ -1083,3 +1083,29 @@ async def test_vast_describe_uses_the_trailing_slash_canonical_path():
         instance = await provider.describe("46343811")
     assert seen["path"] == "/api/v0/instances/46343811/"
     assert instance.state is InstanceState.RUNNING
+
+
+async def test_vast_onstart_persists_container_env_for_ssh_sessions():
+    """sshd spawns fresh environments: without `env | grep _ >> /etc/environment`, the
+    provision-injected secrets exist in the container and are invisible to the payload shell.
+    Take 5 bootstrapped perfectly and exited 2 on a "missing" key that was right there."""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.read()))
+        return httpx.Response(200, json={"success": True, "new_contract": 46999999})
+
+    provider, client = _vast(handler)
+    async with client:
+        await provider.provision(
+            VAST_4090,
+            image="img",
+            env={"PUBLIC_KEY": SSH_PUBLIC_KEY, "FEATHERLESS_API_KEY": "x"},
+            volume_gb=10,
+            label="coryphaeus-env",
+        )
+    onstart = seen["onstart"]
+    env_line = "env | grep _ >> /etc/environment"
+    assert env_line in onstart
+    # And it must run BEFORE sshd comes up, so the first session already sees the env.
+    assert onstart.index(env_line) < onstart.index("authorized_keys")

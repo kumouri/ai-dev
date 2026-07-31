@@ -111,6 +111,13 @@ def _ssh_onstart(public_key: str) -> str:
     quoted = public_key.replace("'", "'\"'\"'")
     return "\n".join(
         [
+            # Container env does NOT reach SSH sessions: sshd spawns fresh environments, so the
+            # provision-injected secrets (FEATHERLESS_API_KEY et al.) are invisible to the
+            # payload shell unless persisted where PAM reads them. This is Vast's own canonical
+            # onstart line — quoted as their docs' example above — and take 5 paid $0.012 to
+            # learn why it exists: the chain bootstrapped perfectly and then exited 2 on a
+            # "missing" key that was sitting in the container environment all along.
+            "env | grep _ >> /etc/environment",
             "mkdir -p /root/.ssh",
             "chmod 700 /root/.ssh",
             # Append, never overwrite: an image (or a human mid-debug) may have installed keys
