@@ -21,6 +21,7 @@ import pytest
 from coryphaeus.cloud.budget import BudgetExceeded, BudgetLedger
 from coryphaeus.cloud.launcher import (
     CANONICAL_PHASES,
+    LauncherError,
     LaunchSpec,
     NoOfferError,
     ProvisionTimeout,
@@ -107,6 +108,12 @@ class RecordingLedger(BudgetLedger):
 def make_exec(log, *, exit_code=0, delay=0.0, exc: BaseException | None = None):
     async def _exec(instance, command):
         log.append("exec")
+        # The readiness knock rides the same exec seam as the payload (one SSH path in
+        # production). Failure scripting here applies to the PAYLOAD: the knock — recognizable
+        # by its "true && mkdir" prologue — succeeds, exactly like a live box whose sshd is up
+        # while the training command is what fails.
+        if command.startswith("true"):
+            return 0
         if exc is not None:
             raise exc
         if delay:
@@ -187,8 +194,11 @@ async def test_happy_path_runs_the_full_story_in_order(tmp_path):
     spec = spec_for(tmp_path, push=((push_file, "/workspace/questions.jsonl"),))
     result = await run_launch(tmp_path, log, StubProvider(log), spec, ledger_for(tmp_path, log))
 
+    # The first exec is the readiness knock: it proves sshd answers AND creates the push
+    # destinations (/workspace is a RunPod convention, not a law of nature — take 4 paid $0.002
+    # to learn a Vast image ships without it).
     assert log == [
-        "reserve", "offers", "provision", "describe", "push", "exec", "pull",
+        "reserve", "offers", "provision", "describe", "exec", "push", "exec", "pull",
         "terminate", "cost_so_far", "settle",
     ]  # fmt: skip
     assert result.exit_code == 0
@@ -439,3 +449,37 @@ def test_build_scp_cmd_uses_scp_port_spelling():
     assert argv[argv.index("-P") + 1] == "41022"  # capital -P: scp is not ssh
     assert "-p" not in argv
     assert argv[-2:] == ["root@203.0.113.10:/workspace/runs", "dest"]
+
+
+async def test_ssh_that_never_answers_still_terminates_and_settles(tmp_path):
+    """A box that runs but cannot be reached (key never installed, sshd absent) must exhaust its
+    knocks, terminate, and settle — not hang, not leak."""
+
+    async def deaf_exec(instance, command):
+        return 255  # ssh's connection/auth failure code
+
+    log: list[str] = []
+    ledger = ledger_for(tmp_path, log)
+    spec = spec_for(tmp_path, ssh_ready_attempts=2, ssh_ready_delay_s=0.01)
+    with pytest.raises(LauncherError, match="never became ready"):
+        await run_launch(tmp_path, log, StubProvider(log), spec, ledger, remote_exec=deaf_exec)
+    assert "terminate" in log and "settle" in log
+
+
+async def test_the_knock_creates_the_push_destinations(tmp_path):
+    """/workspace is a RunPod convention, not a law of nature: the knock's mkdir -p is what
+    makes the push destination exist on ANY image (take 4 paid $0.002 for this line)."""
+    commands: list[str] = []
+
+    async def recording_exec(instance, command):
+        commands.append(command)
+        return 0
+
+    log: list[str] = []
+    await run_launch(
+        tmp_path, log, StubProvider(log), spec_for(tmp_path), ledger_for(tmp_path, log),
+        remote_exec=recording_exec,
+    )  # fmt: skip
+    knock = commands[0]
+    assert knock.startswith("true")
+    assert "mkdir -p /workspace" in knock

@@ -21,12 +21,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 import sys
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import remote as remote_mod
 from .budget import BudgetLedger
@@ -46,6 +47,7 @@ CANONICAL_PHASES = (
     "offer_selected",
     "provisioned",
     "running",
+    "ssh_ready",
     "payload_started",
     "payload_finished",
     "artifacts_pulled",
@@ -169,6 +171,11 @@ class LaunchSpec:
     #: ~6.5 min of transfer before extraction, and marketplace hosts pull cold more often than
     #: not — two live 600s timeouts on pending boxes (2026-07-31, $0.02 each) sized this.
     provision_timeout_s: float = 1500.0
+    #: Knocks on the door after "running": sshd wakes and onstart installs keys AFTER the
+    #: container starts, so the first contact retries rather than fails. 12 x 10s = two minutes
+    #: of patience, which also absorbs slow container init on marketplace hosts.
+    ssh_ready_attempts: int = 12
+    ssh_ready_delay_s: float = 10.0
     poll_interval_s: float = 10.0
     #: Where artifacts accumulate on the box (runs, checkpoints, telemetry).
     remote_artifact_dir: str = "/workspace/runs"
@@ -350,6 +357,36 @@ async def launch(
                     poll_s=spec.poll_interval_s,
                 )
                 events.emit("running", ssh_host=instance.ssh_host, ssh_port=instance.ssh_port)
+
+                # First SSH contact doubles as the readiness gate, and it prepares the push
+                # destinations. Two live lessons in one line (2026-07-31, take 4, $0.002):
+                # "running" means the CONTAINER started, not that sshd has finished waking or
+                # that onstart has written authorized_keys yet — so this retries over a couple
+                # of minutes instead of failing on the first knock. And the destination
+                # directories may simply not exist: /workspace is a RunPod convention, not a
+                # law of nature — a Vast image has no such directory until we make one.
+                ready_cmd = " && ".join(
+                    ["true"]
+                    + [
+                        f"mkdir -p {shlex.quote(str(PurePosixPath(remote).parent))}"
+                        for _, remote in spec.push
+                    ]
+                    + [f"mkdir -p {shlex.quote(spec.remote_artifact_dir)}"]
+                )
+                ssh_ready = False
+                for knock in range(spec.ssh_ready_attempts):
+                    if knock:
+                        await asyncio.sleep(spec.ssh_ready_delay_s)
+                    if await remote_exec(instance, ready_cmd) == 0:
+                        ssh_ready = True
+                        events.emit("ssh_ready", knocks=knock + 1)
+                        break
+                if not ssh_ready:
+                    raise LauncherError(
+                        f"ssh never became ready after {spec.ssh_ready_attempts} attempts — the "
+                        "box ran but could not be reached (key not installed, or sshd absent "
+                        "from the image)"
+                    )
 
                 for local_path, remote_path in spec.push:
                     push_rc = await remote_push(instance, local_path, remote_path)
