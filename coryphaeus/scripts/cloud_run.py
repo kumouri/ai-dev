@@ -60,6 +60,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--volume-gb", type=int, default=30)
     parser.add_argument(
+        "--provision-timeout",
+        type=float,
+        default=1500.0,
+        help="seconds to wait for the box to reach RUNNING before terminating. Size it to the "
+        "image: ~10 GB over a marketplace link needs 15-25 min cold.",
+    )
+    parser.add_argument(
         "--chain",
         choices=("probe", "full", "validate"),
         default="validate",
@@ -435,6 +442,7 @@ async def main(argv: list[str] | None = None) -> int:
         max_price_per_hour=args.max_price,
         max_hours=args.max_hours,
         volume_gb=args.volume_gb,
+        provision_timeout_s=args.provision_timeout,
         remote_artifact_dir=REMOTE_RUNS_DIR,
         artifact_dir=run_dir / "artifacts",
         push=push,
