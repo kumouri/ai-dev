@@ -1,0 +1,176 @@
+{
+  "pinned_at": "2026-07-31T04:05:00+00:00",
+  "source": "featherless /v1/models + openrouter /api/v1/models/*/endpoints (per-endpoint quantization, pricing, uptime probed live against the account)",
+  "notes": "Two-provider blended pool. OpenRouter seats are PINNED per-upstream (provider order + allow_fallbacks=false) because a fallback-routed call is a different served system and poisons calibration. Featherless retires into boutique duty: the exact Qwen2.5 legacy checkpoints and the math specialist nobody serves per-token (verified July 2026), inside its 4-unit account ceiling. 'units' is the cost of ONE call against that provider's governor budget: Featherless publishes concurrency_cost (24-32B = 2, 72B = 4-and-serializing); OpenRouter charges no concurrency premium, so every seat costs 1 and the account-wide governor budget does the throttling. Quantization is recorded per seat; pass rates are properties of the served system, so any seat change triggers recalibration.",
+  "workers": [
+    {
+      "name": "qwen25-14b",
+      "provider": "featherless",
+      "model": "Qwen/Qwen2.5-14B-Instruct",
+      "model_class": "qwen25-14b",
+      "params_b": 14.0,
+      "units": 1,
+      "quantization": "unknown",
+      "tags": [
+        "balanced",
+        "legacy-exact"
+      ],
+      "context_length": 32768
+    },
+    {
+      "name": "qwen25-32b",
+      "provider": "featherless",
+      "model": "Qwen/Qwen2.5-32B-Instruct",
+      "model_class": "qwen25-32b",
+      "params_b": 32.0,
+      "units": 2,
+      "quantization": "unknown",
+      "tags": [
+        "strong",
+        "legacy-exact"
+      ],
+      "context_length": 32768
+    },
+    {
+      "name": "qwen25-math-7b",
+      "provider": "featherless",
+      "model": "Qwen/Qwen2.5-Math-7B-Instruct",
+      "model_class": "qwen25-7b",
+      "params_b": 7.0,
+      "units": 1,
+      "quantization": "unknown",
+      "tags": [
+        "math",
+        "fast",
+        "specialist"
+      ],
+      "context_length": 32768
+    },
+    {
+      "name": "qwen25-72b",
+      "provider": "featherless",
+      "model": "Qwen/Qwen2.5-72B-Instruct",
+      "model_class": "qwen25-72b",
+      "params_b": 72.0,
+      "units": 4,
+      "quantization": "unknown",
+      "tags": [
+        "strong",
+        "legacy-exact",
+        "eval-only"
+      ],
+      "context_length": 32768
+    },
+    {
+      "name": "fl-qwen3-32b",
+      "provider": "featherless",
+      "model": "Qwen/Qwen3-32B",
+      "model_class": "qwen3-32b",
+      "params_b": 32.0,
+      "units": 2,
+      "quantization": "unknown",
+      "tags": [
+        "strong",
+        "quant-ab-counterpart"
+      ],
+      "context_length": 32768
+    },
+    {
+      "name": "or-qwen3-32b",
+      "provider": "openrouter",
+      "model": "qwen/qwen3-32b",
+      "pin": "deepinfra",
+      "params_b": 32.0,
+      "units": 1,
+      "quantization": "fp8",
+      "price_in_per_m": 0.08,
+      "price_out_per_m": 0.28,
+      "tags": [
+        "strong",
+        "quant-ab-counterpart"
+      ],
+      "context_length": 40960
+    },
+    {
+      "name": "or-qwen3-14b",
+      "provider": "openrouter",
+      "model": "qwen/qwen3-14b",
+      "pin": "deepinfra",
+      "params_b": 14.0,
+      "units": 1,
+      "quantization": "fp8",
+      "price_in_per_m": 0.12,
+      "price_out_per_m": 0.24,
+      "tags": [
+        "balanced"
+      ],
+      "context_length": 40960
+    },
+    {
+      "name": "or-mistral-small-24b",
+      "provider": "openrouter",
+      "model": "mistralai/mistral-small-3.2-24b-instruct",
+      "pin": "parasail",
+      "params_b": 24.0,
+      "units": 1,
+      "quantization": "bf16",
+      "price_in_per_m": 0.09,
+      "price_out_per_m": 0.3,
+      "tags": [
+        "balanced",
+        "lineage-mistral"
+      ],
+      "context_length": 131072
+    },
+    {
+      "name": "or-llama31-8b",
+      "provider": "openrouter",
+      "model": "meta-llama/llama-3.1-8b-instruct",
+      "pin": "deepinfra",
+      "params_b": 8.0,
+      "units": 1,
+      "quantization": "fp8",
+      "price_in_per_m": 0.02,
+      "price_out_per_m": 0.04,
+      "tags": [
+        "fast",
+        "cheap",
+        "lineage-llama"
+      ],
+      "context_length": 131072
+    },
+    {
+      "name": "or-phi4-14b",
+      "provider": "openrouter",
+      "model": "microsoft/phi-4",
+      "pin": "deepinfra",
+      "params_b": 14.0,
+      "units": 1,
+      "quantization": "bf16",
+      "price_in_per_m": 0.07,
+      "price_out_per_m": 0.14,
+      "tags": [
+        "math",
+        "balanced",
+        "lineage-phi"
+      ],
+      "context_length": 16384
+    },
+    {
+      "name": "or-llama33-70b",
+      "provider": "openrouter",
+      "model": "meta-llama/llama-3.3-70b-instruct",
+      "pin": "novita",
+      "params_b": 70.0,
+      "units": 1,
+      "quantization": "bf16",
+      "price_in_per_m": 0.135,
+      "price_out_per_m": 0.4,
+      "tags": [
+        "strong",
+        "lineage-llama"
+      ],
+      "context_length": 6000
+    }
+  ]
+}

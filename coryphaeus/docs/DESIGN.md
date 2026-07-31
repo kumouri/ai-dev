@@ -61,14 +61,42 @@ parallel rollouts:
 - **Ollama** is local: the real limit is VRAM (24 GB here), not a quota. A model larger than VRAM
   spills to system RAM and becomes very slow, so it gets a unit cost that keeps it effectively
   serial.
+- **OpenRouter** bills per *token*, not per concurrent request — the pinned upstreams take
+  hundreds in flight. Its unit budget is our politeness bound and the blast radius of a runaway
+  loop, not a provider quota. The scarce resource is money instead: every result carries
+  `cost_usd` (returned usage × the manifest's pinned prices), and paid runs bracket themselves in
+  the **token-spend ledger** (`coryphaeus/spend.py`) — worst case reserved before the first call,
+  actuals settled after, refusal past the monthly ceiling. With provider auto-top-up enabled,
+  that ledger is the only thing that ever says no.
 
 `UnitPool` is therefore an **N-unit counting semaphore** (an `asyncio.Condition`, because
 `asyncio.Semaphore` cannot acquire N atomically — a naive loop of single acquires deadlocks two
 concurrent 4-unit requests against each other). One pool per provider; the budget comes from env
-(`FEATHERLESS_UNIT_BUDGET`, `OLLAMA_UNIT_BUDGET`).
+(`FEATHERLESS_UNIT_BUDGET`, `OLLAMA_UNIT_BUDGET`, `OPENROUTER_UNIT_BUDGET`).
 
 A 429 backs off **that worker** with exponential delay + jitter, never the whole batch — one
 oversubscribed 70B worker must not stall a slice of 2B calls that would have fitted.
+
+## One manifest, two providers — and every OpenRouter seat pins its upstream
+
+The pool is pinned in `src/coryphaeus/manifests/worker_pool.json`, whatever the provider.
+Featherless seats are refreshed by `scripts/featherless_catalog.py` (which merges: it replaces
+only featherless entries, never another provider's). OpenRouter seats are hand-pinned from live
+per-endpoint probes and carry three things a router-of-routers would otherwise hide:
+
+- **`pin`** — the upstream provider the request is locked to (`provider.order` +
+  `allow_fallbacks: false`). OpenRouter is itself a router; unpinned, the same model id can be
+  served by different hosts with different quantizations on consecutive calls. A calibration
+  measured over that is a property of nothing. The adapter also *verifies* provenance
+  response-side and fails a mispinned answer by name, zeroing its text so nothing downstream can
+  score it — while keeping tokens and cost, because the ledger reports what was spent.
+- **`price_in_per_m` / `price_out_per_m`** — required, so a paid worker can never look free.
+- **`quantization`** — recorded per seat (policy: bf16 preferred, fp8 allowed). Pass rates are
+  properties of the *served system*, so a seat change is a recalibration, and it must be visible
+  in this file's diff.
+
+The same principle in one sentence: **a worker is a served system, not a model name** — the
+manifest exists to make every property that affects behaviour part of the pin.
 
 ## Fake-first
 

@@ -199,6 +199,8 @@ def governor_for(specs: Iterable[object], **kwargs: object) -> Governor:
             budgets[provider] = cfg.featherless_unit_budget
         elif provider == "ollama":
             budgets[provider] = cfg.ollama_unit_budget
+        elif provider == "openrouter":
+            budgets[provider] = cfg.openrouter_unit_budget
         else:
             # Fake and any future in-process provider: parallelism is free.
             budgets[provider] = 16

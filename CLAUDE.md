@@ -53,6 +53,7 @@ uv run pytest                                             # offline suite
 uv run pytest -m live                                     # requires a live provider
 uv run ruff check . && uv run ruff format --check .
 uv run python coryphaeus/scripts/smoke_workers.py --local  # ping the local Ollama pool
+uv run python coryphaeus/scripts/smoke_workers.py --openrouter  # pinned seats + cost receipt (~$0.001)
 uv run python coryphaeus/scripts/run_baseline.py --help
 ```
 
@@ -63,14 +64,24 @@ uv run python coryphaeus/scripts/run_baseline.py --help
   URL it resolved, so a wrong one is one line of output rather than a mystery.
 - **Concurrency units come from the provider, not from a size guess.** Featherless publishes
   `concurrency_cost` per model; the pinned manifest
-  (`src/coryphaeus/manifests/featherless_pool.json`, refreshed by `scripts/featherless_catalog.py`)
+  (`src/coryphaeus/manifests/worker_pool.json` — one file, all providers; featherless seats
+  refreshed by `scripts/featherless_catalog.py`, which merges rather than clobbers the others)
   carries it. `units_for_params` is a **fallback only** — the 24–32B band costs 2, not 4. A 4-unit
-  worker consumes a 4-unit account outright and serializes every other rollout.
-- **Reasoning models return reasoning instead of an answer.** Both adapters default to thinking
-  *off* (`think=False` → Ollama's `think` field, Featherless's
-  `chat_template_kwargs={"enable_thinking": false}`). Left on with a modest token budget, a model
-  burns the budget thinking and returns a truncated, plausible, **wrong** answer — which scores as
-  incompetence rather than misconfiguration. Observed both locally and remotely.
+  worker consumes a 4-unit account outright and serializes every other rollout. OpenRouter seats
+  cost 1 unit per call (per-token billing, no concurrency premium); their throttle is the
+  account-wide `OPENROUTER_UNIT_BUDGET`.
+- **OpenRouter is itself a router — every seat is pinned to one upstream** (`pin` in the manifest →
+  `provider.order` + `allow_fallbacks: false`), because unpinned, the same model id can be served
+  at different quantizations by different hosts per call, and a calibration over that describes
+  nothing. Mispinned responses fail loudly with text zeroed; cost is still counted. Per-token spend
+  runs inside the **token-spend ledger** (`coryphaeus/spend.py`, `CORYPHAEUS_TOKEN_BUDGET_USD`,
+  default $50/mo) — with auto-top-up on the account, the ledger is the only refusal there is.
+- **Reasoning models return reasoning instead of an answer.** All remote adapters default to
+  thinking *off* (`think=False` → Ollama's `think` field, Featherless's
+  `chat_template_kwargs={"enable_thinking": false}`, OpenRouter's `reasoning={"enabled": false}`).
+  Left on with a modest token budget, a model burns the budget thinking and returns a truncated,
+  plausible, **wrong** answer — which scores as incompetence rather than misconfiguration.
+  Observed both locally and remotely.
 - **Transient failures must never be scored.** Under GRPO a failed rollout scores zero, and zero
   teaches the policy "that worker was a bad choice" — so a provider hiccup would be laundered into a
   routing lesson. `WorkerBusy` covers 429/502/503/504 **and** the provider's transient error codes,

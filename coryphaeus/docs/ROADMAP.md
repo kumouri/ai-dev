@@ -102,6 +102,7 @@ models. The cost-efficiency half of the paper's result appears even where the ac
 | 1.4 | Remote pool smoke-tested live | ✅ |
 | 1.5 | Catalog-wording sensitivity A/B | ⬜ |
 | 1.6 | `q27`/`g12` back in the local pool for a local heterogeneous arm | ⬜ |
+| 1.7 | Two-provider pool: six pinned OpenRouter seats + token-spend ledger | ✅ |
 
 **Randomised pools, from the paper's abstract.** It trains over randomised agent pools, which is how
 its conductor generalises to arbitrary worker sets. A conductor measured on one fixed pool has
@@ -124,6 +125,26 @@ Probing the account beat guessing, three times over:
 3. **A 4xx can be transient.** The provider returns `400 completion_error` for a generation that
    failed on its side, and `503 capacity_exhausted` while a model spins up. Both must be retried,
    not scored — see below.
+
+### What the July 2026 per-token market taught us (1.7)
+
+The Featherless account's **4 concurrency units were the system-wide throughput ceiling** — during
+cloud training the GPU idled 50–70% waiting on workflow execution, and the provider's higher tiers
+were not purchasable. The fix was pool diversification: six OpenRouter seats (8B–70B across four
+lineages), each **pinned to one upstream** (`allow_fallbacks: false`) because OpenRouter is itself
+a router and an unpinned model id can change host and quantization between calls. Probing the live
+account beat guessing, again:
+
+1. **The Qwen2.5 mid-band is dead per-token.** Nobody on OpenRouter serves 14B/32B Instruct
+   anymore; Featherless keeps those exact legacy checkpoints, so its seats became boutique:
+   `qwen25-14b`, `qwen25-32b`, the 72B eval arm, and the **math specialist nobody hosts per-token**.
+2. **Qwen3-32B is fp8-only across every OpenRouter upstream.** So the pool carries it twice on
+   purpose — `fl-qwen3-32b` (Featherless) vs `or-qwen3-32b` (DeepInfra fp8) — a free
+   served-system A/B on quantization that the calibration comparison measures directly.
+3. **Per-token workers move the scarce resource from concurrency to money.** OpenRouter seats cost
+   1 unit per call and the upstreams take hundreds in flight; what needs governing is spend, and
+   with auto-top-up enabled the **token-spend ledger** (`coryphaeus/spend.py`, same reserve/settle
+   discipline as the cloud ledger, own $50/mo ceiling) is the only refusal in the pipeline.
 
 ### Open design question: infrastructure noise in the reward
 

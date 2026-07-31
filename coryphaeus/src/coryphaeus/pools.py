@@ -24,10 +24,13 @@ from .workers import (
     ollama_spec,
 )
 
-#: Pinned remote pool, written by ``scripts/featherless_catalog.py``. Tracked on purpose: ``units``
-#: comes from the provider's own ``concurrency_cost`` rather than a guess, and pinning it is what
-#: keeps runs comparable. Note the repo ignores any directory named ``data/``, hence ``manifests/``.
-MANIFEST_PATH = Path(__file__).resolve().parent / "manifests" / "featherless_pool.json"
+#: Pinned remote pool across providers. Tracked on purpose: pinning is what keeps runs comparable.
+#: Featherless seats are refreshed by ``scripts/featherless_catalog.py`` (``units`` from the
+#: provider's own ``concurrency_cost``); OpenRouter seats are hand-pinned from live endpoint probes
+#: and carry their upstream ``pin``, per-token prices and quantization — a seat change is a
+#: different served system, so it must be visible in this file's diff. Note the repo ignores any
+#: directory named ``data/``, hence ``manifests/``.
+MANIFEST_PATH = Path(__file__).resolve().parent / "manifests" / "worker_pool.json"
 
 #: Local pool. A ``size_gb`` above assumed VRAM makes a worker near-serial (see workers/ollama.py).
 LOCAL_POOL: tuple[dict, ...] = (
@@ -99,38 +102,84 @@ def build_local_registry(models: tuple[str, ...] | None = None) -> WorkerRegistr
     return registry
 
 
+def _build_remote_worker(entry: dict, units: int):
+    """One manifest row → one worker, dispatched on the row's ``provider``."""
+    provider = entry.get("provider", "featherless")
+    name = entry["name"]
+    if provider == "featherless":
+        return FeatherlessWorker(
+            featherless_spec(
+                name,
+                entry["model"],
+                params_b=entry.get("params_b"),
+                units=units,
+                tags=tuple(entry.get("tags") or ()),
+            )
+        )
+    if provider == "openrouter":
+        # Local import: the adapter needs OPENROUTER_API_KEY machinery that a featherless-only
+        # (or offline) caller should never be asked to satisfy.
+        from .workers.openrouter import OpenRouterWorker, openrouter_spec
+
+        pin = entry.get("pin")
+        if not pin:
+            raise ValueError(
+                f"{name}: openrouter manifest entries require a 'pin' (upstream provider slug) — "
+                "unpinned routing is a different served system per request."
+            )
+        if entry.get("price_in_per_m") is None or entry.get("price_out_per_m") is None:
+            raise ValueError(
+                f"{name}: openrouter manifest entries require price_in_per_m/price_out_per_m — "
+                "a paid worker with no price would look free in every report."
+            )
+        return OpenRouterWorker(
+            openrouter_spec(
+                name,
+                entry["model"],
+                usd_per_mtok_in=float(entry["price_in_per_m"]),
+                usd_per_mtok_out=float(entry["price_out_per_m"]),
+                params_b=entry.get("params_b"),
+                units=units,
+                tags=tuple(entry.get("tags") or ()),
+            ),
+            pin=pin if isinstance(pin, str) else tuple(pin),
+        )
+    raise ValueError(f"{name}: unknown provider {provider!r} in the worker manifest")
+
+
 def build_remote_registry(
     models: tuple[str, ...] | None = None,
     *,
     manifest: Path | None = None,
     max_units: int | None = None,
+    providers: tuple[str, ...] | None = None,
 ) -> WorkerRegistry:
-    """Registry over the pinned remote pool. Requires ``FEATHERLESS_API_KEY``.
+    """Registry over the pinned remote pool — every provider in the manifest.
+
+    Requires the API key for each provider that actually appears after filtering
+    (``FEATHERLESS_API_KEY``, ``OPENROUTER_API_KEY``).
 
     Args:
         max_units: drop workers costing more than this many concurrency units. Use it for training:
-            the account's total budget is small, so a single high-cost worker **serializes every
-            other rollout** — cheap in money, expensive in wall-clock-for-everything-else. Leave it
-            unset for evaluation, where that trade is fine.
+            Featherless's total budget is small, so a single high-cost worker **serializes every
+            other rollout** — cheap in money, expensive in wall-clock-for-everything-else.
+            OpenRouter seats cost 1 (no concurrency premium), so they pass this filter; their
+            throttle is the governor's account-wide budget. Leave it unset for evaluation, where
+            the serializing trade is fine.
+        providers: keep only these providers' seats. The point is key hygiene as much as
+            selection — a featherless-only caller must not be asked for an OpenRouter key just
+            because the manifest gained seats.
     """
     registry = WorkerRegistry()
     for entry in load_manifest(manifest):
         if models and entry["name"] not in models:
             continue
+        if providers and entry.get("provider", "featherless") not in providers:
+            continue
         units = int(entry.get("units") or 1)
         if max_units is not None and units > max_units:
             continue
-        registry.add(
-            FeatherlessWorker(
-                featherless_spec(
-                    entry["name"],
-                    entry["model"],
-                    params_b=entry.get("params_b"),
-                    units=units,
-                    tags=tuple(entry.get("tags") or ()),
-                )
-            )
-        )
+        registry.add(_build_remote_worker(entry, units))
     return registry
 
 
