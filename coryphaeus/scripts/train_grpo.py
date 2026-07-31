@@ -34,6 +34,8 @@ from coryphaeus.train.grpo import (
     build_trainer,
     describe_environment,
 )
+from coryphaeus.workers.featherless import MissingApiKey as FeatherlessMissingKey
+from coryphaeus.workers.openrouter import MissingApiKey as OpenRouterMissingKey
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -79,19 +81,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="wall-clock budget; past it the trainer saves and stops at the next step boundary. "
         "Step count is the ambition, the deadline is the promise. 0 = off.",
     )
+    parser.add_argument(
+        "--providers",
+        default="",
+        help="comma-separated provider filter for the worker pool (featherless, openrouter). "
+        "Default: every provider in the manifest. The launcher passes the providers whose keys "
+        "it actually ships — the pool a box may use is exactly the pool it can authenticate to.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     cfg = settings()
-    if not cfg.has_featherless:
-        print(
-            "FEATHERLESS_API_KEY is not set. Training routes workers remotely so the GPU is free "
-            "for the policy — a local pool would contend for the same VRAM.",
-            file=sys.stderr,
-        )
-        return 2
+    providers = tuple(p.strip() for p in args.providers.split(",") if p.strip()) or None
 
     env = describe_environment()
     print("environment:", json.dumps(env, indent=2))
@@ -99,7 +102,16 @@ def main(argv: list[str] | None = None) -> int:
         print("\nCUDA is not available — refusing to start a training run on CPU.", file=sys.stderr)
         return 2
 
-    registry = build_remote_registry(max_units=args.max_units)
+    try:
+        registry = build_remote_registry(max_units=args.max_units, providers=providers)
+    except (FeatherlessMissingKey, OpenRouterMissingKey) as exc:
+        print(
+            f"{exc}\nTraining routes workers remotely so the GPU is free for the policy — a "
+            "local pool would contend for the same VRAM. If this box should not have that "
+            "provider at all, pass --providers with the ones it has keys for.",
+            file=sys.stderr,
+        )
+        return 2
     if len(registry) < 2:
         print(
             f"the remote pool has {len(registry)} worker(s) at or below {args.max_units} units — "
