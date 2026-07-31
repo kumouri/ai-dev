@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 from coryphaeus.config import settings
-from coryphaeus.datasets.loaders import Question, load_gsm8k
+from coryphaeus.datasets.loaders import Question, load_math_train, load_questions
 from coryphaeus.orchestrate import run_solo
 from coryphaeus.pools import build_remote_registry
 from coryphaeus.reward import score_answer
@@ -36,7 +36,18 @@ from coryphaeus.reward import score_answer
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--limit", type=int, default=800, help="GSM8K train candidates to probe")
+    parser.add_argument("--limit", type=int, default=800, help="candidate questions to probe")
+    parser.add_argument(
+        "--dataset",
+        default="gsm8k",
+        help="question source: gsm8k, math-train, or a JSONL path (see datasets/loaders.py)",
+    )
+    parser.add_argument(
+        "--levels",
+        default="",
+        help="math-train only: difficulty levels to draw from, e.g. '3,4,5'. GSM8K taught us the "
+        "contested middle is the scarce resource; MATH's level field lets the probe start there.",
+    )
     parser.add_argument("--weak", default="qwen25-14b", help="the pool's weakest worker")
     parser.add_argument("--strong", default="qwen25-32b", help="a strong worker")
     parser.add_argument("--out", default="coryphaeus/runs/calibrated-gsm8k.jsonl")
@@ -183,7 +194,13 @@ async def probe(args: argparse.Namespace) -> int:
             )
             return 2
 
-    questions = load_gsm8k(split="train", limit=args.limit)
+    if args.dataset.strip().lower() in {"math-train", "math_train"}:
+        levels = tuple(int(x) for x in args.levels.split(",") if x.strip()) if args.levels else ()
+        questions = load_math_train(limit=args.limit, levels=levels)
+    else:
+        questions = load_questions(args.dataset, limit=args.limit)
+        if args.levels:
+            print("--levels only applies to math-train; ignoring", file=sys.stderr)
     governor = registry.governor()
     semaphore = asyncio.Semaphore(max(1, args.concurrency))
     done = 0
