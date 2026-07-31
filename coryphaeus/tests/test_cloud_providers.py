@@ -33,6 +33,8 @@ from coryphaeus.cloud.providers.vast import MissingApiKey as VastMissingKey
 
 ENV = {"CORYPHAEUS_RUN": "r6", "WORKER_POOL": "featherless"}
 IMAGE = "ghcr.io/example/coryphaeus-trainer:cu124"
+#: Clearly-fake key material — the tests assert plumbing, never validity.
+SSH_PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1FakeKeyMaterialForOfflineTests coryphaeus-launcher"
 
 RUNPOD_4090 = GpuOffer(
     provider="runpod",
@@ -679,6 +681,52 @@ async def test_vast_a_snatched_offer_is_a_clear_provider_error():
             await provider.provision(
                 VAST_4090, image=IMAGE, env=ENV, volume_gb=0, label="coryphaeus-r6"
             )
+
+
+async def test_vast_provision_translates_public_key_into_an_onstart_script():
+    """RunPod's stock templates consume PUBLIC_KEY at boot; Vast images do not, so the backend
+    must build the same contract by hand — or the launcher can never reach the box it paid for."""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.read())
+        return httpx.Response(200, json={"success": True, "new_contract": 22913044})
+
+    provider, client = _vast(handler)
+    env = {**ENV, "PUBLIC_KEY": SSH_PUBLIC_KEY}
+    async with client:
+        await provider.provision(
+            VAST_4090, image=IMAGE, env=env, volume_gb=0, label="coryphaeus-r6"
+        )
+
+    onstart = seen["body"]["onstart"]
+    assert SSH_PUBLIC_KEY in onstart
+    assert "mkdir -p /root/.ssh" in onstart
+    assert "chmod 700 /root/.ssh" in onstart
+    assert ">> /root/.ssh/authorized_keys" in onstart  # append — never clobber existing keys
+    assert "chmod 600 /root/.ssh/authorized_keys" in onstart
+    assert "sshd" in onstart  # some images ship no running sshd; the script must start one
+    # The key ALSO stays in env — harmless duplication beats a missing key on an image that
+    # does understand the RunPod convention.
+    assert seen["body"]["env"]["PUBLIC_KEY"] == SSH_PUBLIC_KEY
+    assert seen["body"]["env"]["CORYPHAEUS_RUN"] == "r6"
+
+
+async def test_vast_provision_without_public_key_sends_no_onstart():
+    """Omission, not an empty script: an empty onstart still lands in the instance record and
+    reads as intent, while absence leaves the image's own boot defaults untouched."""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.read())
+        return httpx.Response(200, json={"success": True, "new_contract": 22913044})
+
+    provider, client = _vast(handler)
+    async with client:
+        await provider.provision(
+            VAST_4090, image=IMAGE, env=ENV, volume_gb=0, label="coryphaeus-r6"
+        )
+    assert "onstart" not in seen["body"]
 
 
 async def test_vast_describe_unwraps_the_plural_key_quirk():
