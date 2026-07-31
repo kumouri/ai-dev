@@ -77,6 +77,26 @@ uv run python coryphaeus/scripts/run_baseline.py --limit 100 --local-only  # the
 uv run python coryphaeus/scripts/report.py runs/<stamp>
 ```
 
+## Cloud training
+
+The GRPO phase rents its GPU: the reward is network-bound, so the cheapest 24 GB card wins —
+~$0.34/hr, ≈$2.70 per overnight run (July 2026). Spend is capped by an append-only budget ledger
+(`CORYPHAEUS_CLOUD_BUDGET_USD`, default $50/month, fail-closed), and every exit path terminates
+the instance. Full runbook — accounts, chains, costs, troubleshooting:
+[docs/CLOUD.md](docs/CLOUD.md).
+
+```bash
+# what would be rented, at what price, against what budget — provisions nothing
+uv run python coryphaeus/scripts/cloud_run.py --provider runpod --chain validate --dry-run
+
+# the ≈$1 end-to-end sanity run: provision → short GSM8K train → checkpoint → terminate
+uv run python coryphaeus/scripts/cloud_run.py --provider runpod --chain validate \
+    --min-vram 24 --max-price 0.40 --max-hours 4 --volume-gb 30
+
+# the belt on top of auto-terminate: kill anything of ours still running on the account
+uv run python coryphaeus/scripts/cloud_run.py --provider runpod --terminate-orphans
+```
+
 ## Configuration
 
 Everything environment-specific is read from the environment with a documented default; nothing is

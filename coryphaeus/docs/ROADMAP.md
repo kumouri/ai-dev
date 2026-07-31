@@ -280,6 +280,15 @@ The 6-sample re-probe of the 153 unattempted v1 questions (2026-07-30):
   shells. The r5 gate arbitrates whether the 59 suffice; a FAIL triggers a refilter from the
   sidecar (free) rather than a re-probe.
 
+**Final status (2026-07-30): the corpus is exhausted.** Three gate runs, three fails — **33%,
+then 20%, then 22%** zero-variance groups against the 20% bar (the gate is strict-less-than, so
+20% does not pass; a tie goes to not shipping). Each refilter between them was free (sidecar
+rates, no re-probe) and each moved the number a little; none could clear the bar, because the
+extrapolation above was right: GSM8K's genuinely contested middle for a 14B+ pool is ~7%, and no
+band over measured rates can manufacture contest that is not in the corpus. Verdict: stop
+filtering, change corpus. **MATH-tier is the next training set, and standing it up is the first
+cloud workload — see phase 4.**
+
 **Checkpointing is now load-bearing:** `save_steps=10` (~≤80 min exposure), `save_total_limit=3`,
 `--resume [checkpoint]` wired to TRL's `resume_from_checkpoint`, and `--checkpoint-dir` pointed at
 native ext4 — 6–9 GB checkpoints over drvfs/9P are their own slow-motion incident. Dense
@@ -350,9 +359,49 @@ workflows is the first thing that goes wrong, and phase 0 showed the prompted co
 deficit was formatting rather than routing. Price the cost term into the reward only once accuracy
 moves.
 
-## Phase 4 — scale the policy ⬜
+## Phase 4 — cloud training 🚧
 
-7B QLoRA via Unsloth, only if 1.5B showed signal. Compare against phase 3 at equal rollout budget.
+GSM8K's exhaustion (phase 3, above) sets the next corpus — MATH-tier questions — and phase 3's
+three runs of fighting the desktop's own ambient VRAM (WDDM spill, 13.7 GB "free" that wasn't)
+set the venue: the policy moves to a rented box, and the desktop goes back to being free for
+calibration and evaluation.
+
+**The decision (July 2026 pricing).** Two independent research passes converged on the same
+number: a community-cloud RTX 4090 runs ~**$0.34/hr**. The GRPO reward is network-bound — the
+GPU idles 50–70% of every step waiting on worker calls (r2 measured ~1 minute of GPU work inside
+a ~10-minute step) — so the *cheapest* card that fits the policy wins, not the fastest, and an
+overnight 200-step run is ≈ **$2.70**. Rent-don't-buy falls out of the same utilisation: a
+$4,329 RTX 5090 against a rented A100 (~$0.69/hr) breaks even after ~**12 years** at 10 h/week.
+
+**The architecture.** Policy + trainer on the rented box; workers stay on the flat-rate provider
+exactly as before (the box's network is now part of the reward path — hence the Vast network
+floors in [CLOUD.md](CLOUD.md)); calibration and evaluation stay local and free. The training
+code does not change: the box is a location, not a design.
+
+**Four locked decisions:**
+
+1. **Two-provider abstraction.** RunPod and Vast behind the five-verb `CloudProvider` protocol,
+   plus a fake backend so everything above the contract tests offline. One provider is a
+   dependency; two is a market.
+2. **A $50/month enforced ceiling.** Append-only receipts, reservation-before-provision, settle
+   after terminate, fail-closed: a crashed launcher over-counts, never under.
+   `CORYPHAEUS_CLOUD_BUDGET_USD` raises it deliberately.
+3. **Full-FT 1.5B now, LoRA at 7B.** The 1.5B full-finetune fits a 24 GB card; the 7B step keeps
+   the old phase-4 gate unchanged — only if 1.5B shows signal, compared at equal rollout
+   budget — and goes LoRA on a 48 GB A6000 at essentially the same hourly price.
+4. **Validate-then-MATH.** The first paid run is the ≈$1 GSM8K `validate` chain — a corpus whose
+   behaviour on this stack is thoroughly known — so the first MATH run debugs MATH, not the
+   plumbing.
+
+| # | Item | Status |
+|---|---|---|
+| 4.1 | `cloud/` scaffold: five-verb provider contract, append-only budget ledger | ✅ |
+| 4.2 | Notifications: env-pluggable Telegram, `NullNotifier` default, never raises into a run | ✅ |
+| 4.3 | RunPod + Vast backends behind the contract (Vast with network floors) | 🚧 |
+| 4.4 | Launcher + `cloud_run.py` chains (`validate` / `probe` / `full`), `--terminate-orphans` | 🚧 |
+| 4.5 | Runbook ([CLOUD.md](CLOUD.md)), env documented, gotchas in project memory | ✅ |
+| 4.6 | The ≈$1 `validate` run on a real box | ⬜ |
+| 4.7 | MATH-tier calibration + the first cloud training run | ⬜ |
 
 ## Phase 5 — the world model over workers ⬜
 

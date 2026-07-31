@@ -85,3 +85,18 @@ uv run python coryphaeus/scripts/run_baseline.py --help
 - **A malformed workflow is a reward signal, not an exception.** Parse failures are recorded with a
   reason and scored zero. Never "helpfully" repair a workflow with a second model call — that
   launders the very error the policy needs to learn from.
+- **The budget ledger is append-only receipts, fail-closed.** Reservations are written before
+  provisioning at worst-case cost and settled after termination at actual; a crashed launcher
+  leaves its reservation counting, so the ledger can only over-count. Never hand-edit it to "fix"
+  spend — raise `CORYPHAEUS_CLOUD_BUDGET_USD` (or `--terminate-orphans`, which settles) instead.
+- **`terminate()` is idempotent by contract**, because the launcher calls it from every exit path
+  *including crash handlers* — a backend that errors on double-terminate breaks the guarantee that
+  a rented GPU never outlives its job. `--terminate-orphans` is the belt on top of that.
+- **Notifications are env-pluggable and must never raise into a run.** No `TELEGRAM_*` env means
+  `NullNotifier`, silently. A `send()` failure is logged and swallowed (`cloud/notify.py`) — it
+  shares the exit path with `terminate()`, so an exception there is a billing leak, not a UX bug.
+  The bot token lives in the URL, so failure logs carry the exception *type* only.
+- **The Vast backend filters hosts on network floors** (reliability, bandwidth), not price alone:
+  the GRPO reward is network-bound — every rollout calls the worker API from the rented box — so
+  on a marketplace a cheap host with bad network is a slow host. Vast hosts also set their own
+  egress prices, unlike RunPod's zero. See `docs/CLOUD.md`.

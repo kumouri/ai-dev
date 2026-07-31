@@ -89,7 +89,9 @@ unvalidated model in the loop, and phase 0 exists to remove unvalidated things.
 - **Policy sizing against 24 GB.** The paper used ~160 GB for full-precision 7B GRPO at 64
   rollouts/question. So: **Qwen2.5-1.5B-Instruct full GRPO first** (fits, iterates fast, and if
   routing signal exists it should appear at 1.5B), then **7B QLoRA via Unsloth** once 1.5B shows
-  signal. The harness is model-agnostic; policy choice is config.
+  signal. The harness is model-agnostic; policy choice is config. *(Phase-4 update, July 2026:
+  training moved to a rented card, so the 24 GB constraint no longer binds — the 7B step becomes
+  LoRA on a 48 GB A6000 at the same hourly price; see [ROADMAP.md](ROADMAP.md) phase 4.)*
 - **Workers = Featherless (flat rate) + local Ollama**, not frontier APIs. GRPO's appetite for
   rollouts makes per-token worker billing the dominant cost, which is exactly what a flat rate
   removes. The binding constraint becomes concurrency units, which is why the governor exists.
