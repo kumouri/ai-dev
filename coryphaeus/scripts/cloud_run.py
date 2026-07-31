@@ -58,7 +58,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=8.0,
         help="drives BOTH the budget reservation and the wall-clock hard kill",
     )
-    parser.add_argument("--volume-gb", type=int, default=30)
+    # 60, not 30: the disk holds ~20 GB of unpacked image + ~8 GB venv + ~3 GB model cache +
+    # ~6 GB PER CHECKPOINT (1.5B with optimizer state, save_total_limit=3). Take 6 finished 19
+    # training steps and died writing checkpoint-20 at 30 GB: "No space left on device".
+    parser.add_argument("--volume-gb", type=int, default=60)
     parser.add_argument(
         "--provision-timeout",
         type=float,

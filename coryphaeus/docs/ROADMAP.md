@@ -289,6 +289,31 @@ band over measured rates can manufacture contest that is not in the corpus. Verd
 filtering, change corpus. **MATH-tier is the next training set, and standing it up is the first
 cloud workload — see phase 4.**
 
+### Phase 4 validation night (2026-07-31) — the pipeline works, $0.13 of tuition
+
+Six takes against live providers, each failing exactly one layer deeper, every lesson now a pinned
+test:
+
+1. RunPod's create-pod 400s without `disk` — mandatory in practice, optional in the schema.
+2. (RunPod account 402'd on balance despite auto-top-up — flagged to the account holder; rerouted
+   to Vast, which is why two providers exist.)
+3. Vast answers non-JSON in ways that must not crash a poll loop (`body_json` everywhere).
+4. Vast's bare paths 301 to trailing-slash canonicals; its v0 list endpoint is formally dead
+   (410 → v1). Ten minutes of UNKNOWN, $0.02.
+5. "Running" ≠ reachable: sshd wakes and keys install after the container starts, and /workspace
+   is a RunPod convention a Vast image does not have — the launcher now knocks (retrying
+   readiness probe that also mkdir -p's every push destination).
+6. Container env does not reach SSH sessions — Vast's canonical `env | grep _ >>
+   /etc/environment` onstart line, which our own docstring had been quoting without performing.
+7. Disk arithmetic: image + venv + model + ~6 GB/checkpoint ≈ 43 GB against a 30 GB disk. Take 6
+   completed 19 cloud training steps and died writing checkpoint-20. Default volume is now 60 GB.
+
+**End-to-end proof:** take 6 provisioned in 33 s, knocked, pushed, cloned at the latest develop,
+synced, trained 20 GRPO steps at 88–127 s/step on a $0.12/hr 3090, and its telemetry was pulled
+home before terminate — where the gate verdict was computed locally: 6/20 zero-variance = 30%,
+FAIL. GSM8K's fourth and final confirmation, this time measured on rented silicon. The corpus
+chapter is closed; MATH-tier is the first real cloud workload.
+
 **Checkpointing is now load-bearing:** `save_steps=10` (~≤80 min exposure), `save_total_limit=3`,
 `--resume [checkpoint]` wired to TRL's `resume_from_checkpoint`, and `--checkpoint-dir` pointed at
 native ext4 — 6–9 GB checkpoints over drvfs/9P are their own slow-motion incident. Dense
