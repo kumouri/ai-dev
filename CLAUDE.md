@@ -86,6 +86,9 @@ uv run python coryphaeus/scripts/run_baseline.py --help
   (`require_parameters` filters them), so non-reasoning seats carry `think: null` (= omit); and
   an endpoint can *accept* the knob yet ignore it, streaming reasoning to a separate billed
   field (qwen3-14b@deepinfra, live 2026-07-31) — recorded per call as `meta.reasoning_chars`.
+  Seats that reason regardless also carry `max_tokens_floor` (qwen3 seats: 2048): under a
+  generic 1024 cap the burn truncated them to 4.8–12.2% solo on MATH — fake incompetence the
+  baseline exposed; the adapter raises any lower caller cap to the floor.
 - **Transient failures must never be scored.** Under GRPO a failed rollout scores zero, and zero
   teaches the policy "that worker was a bad choice" — so a provider hiccup would be laundered into a
   routing lesson. `WorkerBusy` covers 429/502/503/504 **and** the provider's transient error codes,

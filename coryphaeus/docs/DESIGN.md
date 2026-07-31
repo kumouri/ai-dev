@@ -99,6 +99,11 @@ per-endpoint probes and carry three things a router-of-routers would otherwise h
   entire seat ("No endpoints found"). And an endpoint can accept the knob yet ignore it,
   streaming billed reasoning to a separate field — metered per call (`meta.reasoning_chars`)
   and named as the failure when it starves content, instead of a mute "empty response".
+- **`max_tokens_floor`** — for seats whose endpoint reasons regardless of the knob, the token
+  budget must buy the burn *plus* the answer. The 2026-07-31 baseline measured the alternative:
+  under a generic 1024 cap the qwen3 seats truncated to 4.8–12.2% solo on MATH — capability
+  read as incompetence, and an oracle ceiling suppressed by configuration. The adapter raises
+  any lower caller cap to the seat's floor; a token cap must not hand out zeros.
 
 The same principle in one sentence: **a worker is a served system, not a model name** — the
 manifest exists to make every property that affects behaviour part of the pin.

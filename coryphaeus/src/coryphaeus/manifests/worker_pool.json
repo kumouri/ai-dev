@@ -1,7 +1,7 @@
 {
   "pinned_at": "2026-07-31T04:05:00+00:00",
   "source": "featherless /v1/models + openrouter /api/v1/models/*/endpoints (per-endpoint quantization, pricing, uptime probed live against the account)",
-  "notes": "Two-provider blended pool. OpenRouter seats are PINNED per-upstream (provider order + allow_fallbacks=false) because a fallback-routed call is a different served system and poisons calibration. Featherless retires into boutique duty: the exact Qwen2.5 legacy checkpoints and the math specialist nobody serves per-token (verified July 2026), inside its 4-unit account ceiling. 'units' is the cost of ONE call against that provider's governor budget: Featherless publishes concurrency_cost (24-32B = 2, 72B = 4-and-serializing); OpenRouter charges no concurrency premium, so every seat costs 1 and the account-wide governor budget does the throttling. Quantization is recorded per seat; pass rates are properties of the served system, so any seat change triggers recalibration. Per-seat 'think': false sends the reasoning-disable knob; null omits the field entirely for upstreams with no reasoning control (require_parameters would otherwise 404 the seat). Live quirk (2026-07-31 smoke): qwen3-14b@deepinfra accepts the knob but ignores it, streaming reasoning to a separate response field — billed, recorded per call as meta.reasoning_chars, and harmless at >=512-token budgets; the 32B on the same host honors it.",
+  "notes": "Two-provider blended pool. OpenRouter seats are PINNED per-upstream (provider order + allow_fallbacks=false) because a fallback-routed call is a different served system and poisons calibration. Featherless retires into boutique duty: the exact Qwen2.5 legacy checkpoints and the math specialist nobody serves per-token (verified July 2026), inside its 4-unit account ceiling. 'units' is the cost of ONE call against that provider's governor budget: Featherless publishes concurrency_cost (24-32B = 2, 72B = 4-and-serializing); OpenRouter charges no concurrency premium, so every seat costs 1 and the account-wide governor budget does the throttling. Quantization is recorded per seat; pass rates are properties of the served system, so any seat change triggers recalibration. Per-seat 'think': false sends the reasoning-disable knob; null omits the field entirely for upstreams with no reasoning control (require_parameters would otherwise 404 the seat). Live quirk (2026-07-31 smoke): qwen3-14b@deepinfra accepts the knob but ignores it, streaming reasoning to a separate response field — billed, recorded per call as meta.reasoning_chars, and harmless at >=512-token budgets; the 32B on the same host honors it. 'max_tokens_floor' (baseline 2026-07-31): both qwen3 seats burn ~1.1k tokens of reasoning on MATH-hard prompts regardless of the disable knob, so a 1024 cap truncates before the answer and scores 4.8-12.2% solo — capability was 60%+ class. The adapter raises any lower caller cap to the floor; a token cap must not hand out zeros.",
   "workers": [
     {
       "name": "qwen25-14b",
@@ -90,7 +90,8 @@
         "quant-ab-counterpart"
       ],
       "context_length": 40960,
-      "think": false
+      "think": false,
+      "max_tokens_floor": 2048
     },
     {
       "name": "or-qwen3-14b",
@@ -106,7 +107,8 @@
         "balanced"
       ],
       "context_length": 40960,
-      "think": false
+      "think": false,
+      "max_tokens_floor": 2048
     },
     {
       "name": "or-mistral-small-24b",

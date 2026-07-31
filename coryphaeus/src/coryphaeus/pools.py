@@ -146,6 +146,9 @@ def _build_remote_worker(entry: dict, units: int):
             # JSON null → None → the reasoning field is omitted: for upstreams with no reasoning
             # control, sending it under require_parameters 404s the seat ("No endpoints found").
             think=entry.get("think", False),
+            # Seats whose endpoint reasons regardless of the knob need room for burn + answer;
+            # a generic cap truncates them into fake incompetence (baseline 2026-07-31).
+            max_tokens_floor=int(entry.get("max_tokens_floor") or 0),
         )
     raise ValueError(f"{name}: unknown provider {provider!r} in the worker manifest")
 
