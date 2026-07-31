@@ -57,6 +57,22 @@ MIN_INET_DOWN_MBPS = 200.0
 #: the hosts that flap mid-run; an interrupted run pays for re-provisioning AND re-warming the
 #: trainer, so "slightly cheaper but occasionally vanishes" is a bad trade here.
 MIN_RELIABILITY = 0.98
+#: Minimum CUDA version the host's driver must support (Vast's ``cuda_max_good``). Bootstrap
+#: installs the repo's pinned torch, whose CUDA build refuses older drivers — observed live
+#: 2026-07-31: a healthy-scoring host carried a 12.8 driver, and the very first training step
+#: died with "NVIDIA driver too old" AFTER a fully-billed ~50-minute bootstrap. A host that
+#: does not report the field is refused too: an unknown driver is the same gamble at the same
+#: price. Raise in lockstep with torch's CUDA build; override via ``CORYPHAEUS_VAST_MIN_CUDA``.
+DEFAULT_MIN_CUDA = 12.9
+
+
+def _min_cuda() -> float:
+    raw = os.environ.get("CORYPHAEUS_VAST_MIN_CUDA", "").strip()
+    try:
+        return float(raw) if raw else DEFAULT_MIN_CUDA
+    except ValueError:
+        return DEFAULT_MIN_CUDA
+
 
 #: ``actual_status`` → normalized state. The docs' own guidance (July 2026): once
 #: ``actual_status`` is "exited", "unknown" or "offline" the instance "will never reach
@@ -293,6 +309,7 @@ class VastProvider:
             "dph_total": {"lte": max_price_per_hour},
             "inet_down": {"gte": MIN_INET_DOWN_MBPS},
             "reliability2": {"gte": MIN_RELIABILITY},
+            "cuda_max_good": {"gte": _min_cuda()},
             "order": [["dph_total", "asc"]],
             "limit": 64,
         }
@@ -309,6 +326,7 @@ class VastProvider:
                 f"(http {response.status_code}): {response.text[:120]!r}"
             )
         excluded = _excluded_ids()
+        min_cuda = _min_cuda()
         rentable: list[GpuOffer] = []
         for raw in (data or {}).get("offers") or []:
             # round(), not floor: 24564 MB is a 24 GB card, and flooring it to 23 would fail
@@ -320,6 +338,10 @@ class VastProvider:
             if vram_gb < min_vram_gb or price > max_price_per_hour:
                 continue
             if inet_down < MIN_INET_DOWN_MBPS or reliability < MIN_RELIABILITY:
+                continue
+            # Missing counts as 0 and is refused: an unreported driver is the 12.8 gamble in
+            # disguise, discovered only after a fully-billed bootstrap.
+            if float(raw.get("cuda_max_good") or 0.0) < min_cuda:
                 continue
             if excluded and (
                 str(raw.get("host_id") or "") in excluded
