@@ -41,7 +41,7 @@ import httpx
 
 from ...config import settings
 from ...workers.base import TRANSIENT_STATUSES
-from .base import GpuOffer, Instance, InstanceState, ProviderError
+from .base import GpuOffer, Instance, InstanceState, ProviderError, body_json
 
 
 class MissingApiKey(RuntimeError):
@@ -258,8 +258,14 @@ class VastProvider:
                 f"{self.name}: offer search failed — "
                 f"http {response.status_code}: {_reason(response)}"
             )
+        data = body_json(response)
+        if data is None:
+            raise ProviderError(
+                f"{self.name}: offer search returned non-JSON "
+                f"(http {response.status_code}): {response.text[:120]!r}"
+            )
         rentable: list[GpuOffer] = []
-        for raw in (response.json() or {}).get("offers") or []:
+        for raw in (data or {}).get("offers") or []:
             # round(), not floor: 24564 MB is a 24 GB card, and flooring it to 23 would fail
             # the very min_vram_gb comparison the caller asked for.
             vram_gb = round(float(raw.get("gpu_ram") or 0) / 1024)
@@ -319,7 +325,13 @@ class VastProvider:
                 f"{self.name}: provision of offer {offer.offer_id} refused — "
                 f"http {response.status_code}: {_reason(response)}"
             )
-        body = response.json() or {}
+        body = body_json(response)
+        if body is None:
+            raise ProviderError(
+                f"{self.name}: provision of offer {offer.offer_id} returned http "
+                f"{response.status_code} with a non-JSON body — a contract MAY exist; "
+                "reconcile with list_instances before retrying"
+            )
         if not body.get("success") or body.get("new_contract") is None:
             # An offer can be snatched between search and rent — the marketplace's race, not
             # ours. Surface the API's own message so the caller can move to the next offer.
@@ -350,8 +362,14 @@ class VastProvider:
             return self._opaque(instance_id, InstanceState.UNKNOWN, _reason(response))
         # The single instance arrives under a PLURAL key — {"instances": {...}} — verified
         # July 2026. Reading it as a list here would be the bug.
-        body = (response.json() or {}).get("instances") or {}
-        return self._to_instance(body, instance_id=instance_id)
+        data = body_json(response)
+        if data is None:
+            # Observed live 2026-07-31: a just-created contract briefly answers 2xx with an
+            # EMPTY body. That is "not ready to say", i.e. UNKNOWN — the poll keeps polling.
+            return self._opaque(
+                instance_id, InstanceState.UNKNOWN, "non-JSON body (fresh contract?)"
+            )
+        return self._to_instance((data or {}).get("instances") or {}, instance_id=instance_id)
 
     async def list_instances(self) -> Sequence[Instance]:
         """Every rental contract on the account, any state — the orphan sweep's raw material.
@@ -375,8 +393,13 @@ class VastProvider:
                 f"{self.name}: listing instances failed — "
                 f"http {response.status_code}: {_reason(response)}"
             )
-        rows = (response.json() or {}).get("instances") or []
-        return [self._to_instance(row) for row in rows]
+        data = body_json(response)
+        if data is None:
+            raise ProviderError(
+                f"{self.name}: instance list returned non-JSON "
+                f"(http {response.status_code}) — could-not-look must not read as nothing-there"
+            )
+        return [self._to_instance(row) for row in (data or {}).get("instances") or []]
 
     def _to_instance(self, body: dict, *, instance_id: str | None = None) -> Instance:
         status = body.get("actual_status")
@@ -433,7 +456,10 @@ class VastProvider:
             return None
         if response.status_code >= 400:
             return None
-        body = (response.json() or {}).get("instances") or {}
+        data = body_json(response)
+        if data is None:
+            return None
+        body = (data or {}).get("instances") or {}
         start = body.get("start_date")
         rate = body.get("dph_total")
         if start is None or rate is None:

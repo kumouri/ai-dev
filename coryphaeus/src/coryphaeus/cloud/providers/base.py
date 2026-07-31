@@ -18,6 +18,21 @@ class ProviderError(RuntimeError):
     own reason — a refused provision must be explainable to a human reading a log at 7am."""
 
 
+def body_json(response) -> dict | list | None:
+    """The response body as JSON, or ``None`` when it is not JSON at all.
+
+    Exists because the first live Vast run died on exactly this: a 2xx with an **empty body**
+    for a just-created contract, and a bare ``response.json()`` raised ``JSONDecodeError``
+    through ``describe()``'s never-raises contract and killed the poll loop. Every call site
+    decides what ``None`` means for ITS contract — UNKNOWN for describe, ``None`` for
+    cost_so_far, a named ProviderError for offers/provision — but none of them may crash on it.
+    """
+    try:
+        return response.json()
+    except ValueError:
+        return None
+
+
 class InstanceState(enum.Enum):
     PENDING = "pending"
     RUNNING = "running"

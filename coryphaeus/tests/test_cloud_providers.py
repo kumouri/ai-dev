@@ -1005,3 +1005,63 @@ async def test_fake_list_instances_reflects_provision_and_terminate_history():
     again = await fake.list_instances()
     assert [i.state for i in again] == [InstanceState.RUNNING, InstanceState.TERMINATED]
     assert await fake.cost_so_far(kept.instance_id) == cost_before
+
+
+# --- non-JSON bodies: the first live Vast run's lesson ------------------------------------------
+# A just-created contract answered 2xx with an EMPTY body and JSONDecodeError crashed the poll
+# loop straight through describe()'s never-raises contract. Every verb now has a defined answer
+# to "the provider spoke, but not in JSON."
+
+
+async def test_vast_describe_treats_a_non_json_body_as_unknown():
+    """The observed live failure (2026-07-31): empty 200 from a fresh contract must poll on."""
+    provider, client = _vast(lambda r: httpx.Response(200, text=""))
+    async with client:
+        instance = await provider.describe("46343228")
+    assert instance.state is InstanceState.UNKNOWN
+
+
+async def test_runpod_describe_treats_a_non_json_body_as_unknown():
+    provider, client = _runpod(lambda r: httpx.Response(200, text="<html>gateway</html>"))
+    async with client:
+        instance = await provider.describe("pod-1")
+    assert instance.state is InstanceState.UNKNOWN
+
+
+async def test_vast_cost_returns_none_on_a_non_json_body():
+    provider, client = _vast(lambda r: httpx.Response(200, text=""))
+    async with client:
+        assert await provider.cost_so_far("46343228") is None
+
+
+async def test_runpod_cost_returns_none_on_a_non_json_body():
+    provider, client = _runpod(lambda r: httpx.Response(200, text=""))
+    async with client:
+        assert await provider.cost_so_far("pod-1") is None
+
+
+async def test_vast_offers_raise_a_named_error_on_a_non_json_body():
+    provider, client = _vast(lambda r: httpx.Response(200, text="<html>cdn hiccup</html>"))
+    async with client:
+        with pytest.raises(ProviderError, match="non-JSON"):
+            await provider.offers(min_vram_gb=24, max_price_per_hour=0.60)
+
+
+async def test_runpod_list_raises_on_a_non_json_body():
+    """could-not-look must never read as nothing-there while a GPU bills."""
+    provider, client = _runpod(lambda r: httpx.Response(200, text=""))
+    async with client:
+        with pytest.raises(ProviderError, match="could-not-look"):
+            await provider.list_instances()
+
+
+async def test_vast_provision_2xx_with_garbage_says_reconcile_not_retry():
+    """A 2xx whose body we cannot read means a contract MAY exist — same ambiguity as a
+    timed-out create, same rule: reconcile, never blind-retry into a second rental."""
+    provider, client = _vast(lambda r: httpx.Response(200, text=""))
+    offer = GpuOffer(
+        provider="vast", offer_id="123", gpu_name="RTX 3090", vram_gb=24, price_per_hour=0.12
+    )
+    async with client:
+        with pytest.raises(ProviderError, match="reconcile"):
+            await provider.provision(offer, image="img", env={}, volume_gb=10, label="coryphaeus-x")
