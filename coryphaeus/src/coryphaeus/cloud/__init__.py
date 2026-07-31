@@ -17,6 +17,7 @@ Design rules, non-negotiable:
 """
 
 from .budget import BudgetExceeded, BudgetLedger
+from .notify import Notifier, NullNotifier, TelegramNotifier, make_notifier
 from .providers import CloudProvider, GpuOffer, Instance, InstanceState, ProviderError
 
 __all__ = [
@@ -26,5 +27,9 @@ __all__ = [
     "GpuOffer",
     "Instance",
     "InstanceState",
+    "Notifier",
+    "NullNotifier",
     "ProviderError",
+    "TelegramNotifier",
+    "make_notifier",
 ]
