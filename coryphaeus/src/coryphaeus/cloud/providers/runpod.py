@@ -35,7 +35,7 @@ import httpx
 
 from ...config import settings
 from ...workers.base import TRANSIENT_STATUSES
-from .base import GpuOffer, Instance, InstanceState, ProviderError
+from .base import GpuOffer, Instance, InstanceState, ProviderError, body_json
 
 
 class MissingApiKey(RuntimeError):
@@ -201,8 +201,14 @@ class RunPodProvider:
                 f"{self.name}: listing gpus failed — "
                 f"http {response.status_code}: {_reason(response)}"
             )
+        data = body_json(response)
+        if data is None:
+            raise ProviderError(
+                f"{self.name}: gpu catalog returned non-JSON "
+                f"(http {response.status_code}): {response.text[:120]!r}"
+            )
         rentable: list[GpuOffer] = []
-        for gpu in (response.json() or {}).get("gpus") or []:
+        for gpu in (data or {}).get("gpus") or []:
             community = (gpu.get("price") or {}).get("community")
             if community is None or gpu.get("availability") == "NONE":
                 continue
@@ -257,7 +263,13 @@ class RunPodProvider:
                 f"{self.name}: provision of {offer.offer_id!r} refused — "
                 f"http {response.status_code}: {_reason(response)}"
             )
-        return self._to_instance(response.json() or {})
+        created = body_json(response)
+        if created is None:
+            raise ProviderError(
+                f"{self.name}: create pod returned http {response.status_code} with a non-JSON "
+                "body — a pod MAY exist; reconcile with list_instances before retrying"
+            )
+        return self._to_instance(created)
 
     async def describe(self, instance_id: str) -> Instance:
         """Current pod state; never raises — a poll failure is UNKNOWN, the caller decides.
@@ -274,7 +286,11 @@ class RunPodProvider:
             return self._opaque(instance_id, InstanceState.TERMINATED, _reason(response))
         if response.status_code >= 400:
             return self._opaque(instance_id, InstanceState.UNKNOWN, _reason(response))
-        return self._to_instance(response.json() or {})
+        pod = body_json(response)
+        if pod is None:
+            # "Spoke, but not in JSON" is a poll answer, not a crash: UNKNOWN, poll again.
+            return self._opaque(instance_id, InstanceState.UNKNOWN, "non-JSON body")
+        return self._to_instance(pod)
 
     async def list_instances(self) -> Sequence[Instance]:
         """Every pod on the account, any state — the billing-leak backstop's raw material.
@@ -291,7 +307,13 @@ class RunPodProvider:
                 f"{self.name}: listing pods failed — "
                 f"http {response.status_code}: {_reason(response)}"
             )
-        return [self._to_instance(pod) for pod in (response.json() or {}).get("pods") or []]
+        data = body_json(response)
+        if data is None:
+            raise ProviderError(
+                f"{self.name}: pod list returned non-JSON "
+                f"(http {response.status_code}) — could-not-look must not read as nothing-there"
+            )
+        return [self._to_instance(pod) for pod in (data or {}).get("pods") or []]
 
     async def terminate(self, instance_id: str) -> None:
         """DELETE the pod. Idempotent by construction: 404 means already gone, which is success.
@@ -323,8 +345,10 @@ class RunPodProvider:
             return None
         if response.status_code >= 400:
             return None
-        pod = response.json() or {}
-        uptime = (pod.get("runtime") or {}).get("uptime")
+        pod = body_json(response)
+        if pod is None:
+            return None
+        uptime = ((pod or {}).get("runtime") or {}).get("uptime")
         if uptime is None:
             return None
         return float(uptime) / 3600.0 * float(pod.get("cost") or 0.0)
