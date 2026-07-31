@@ -1,8 +1,8 @@
 """The provider contract. Two real backends implement it; the fake one tests everything above it.
 
-Kept deliberately small: five operations are enough to provision, watch, reach, and kill a box.
-Anything a specific provider needs beyond this (offer filtering, volume mounting) lives inside
-that backend, behind these five verbs.
+Kept deliberately small: six operations are enough to provision, watch, reach, and kill a box —
+and to sweep the account for orphans afterward. Anything a specific provider needs beyond this
+(offer filtering, volume mounting) lives inside that backend, behind these six verbs.
 """
 
 from __future__ import annotations
@@ -82,6 +82,13 @@ class CloudProvider(Protocol):
 
     async def describe(self, instance_id: str) -> Instance:
         """Current state. UNKNOWN on a describe failure — the caller decides how to treat it."""
+        ...
+
+    async def list_instances(self) -> Sequence[Instance]:
+        """Every instance this account currently has, in any state. The orphan sweep joins these
+        against the local ledger by the label recorded in ``Instance.raw["label"]``, so backends
+        MUST surface whatever label/name field the API returns into ``raw["label"]`` (empty
+        string when the provider has none)."""
         ...
 
     async def terminate(self, instance_id: str) -> None:

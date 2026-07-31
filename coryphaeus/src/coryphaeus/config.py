@@ -22,6 +22,12 @@ MEMBER_ROOT = Path(__file__).resolve().parents[2]
 #: .env rather than in this default.
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 DEFAULT_FEATHERLESS_BASE_URL = "https://api.featherless.ai/v1"
+#: RunPod REST v2 (verified July 2026). The older GraphQL API and the v1 REST API at
+#: rest.runpod.io both still answer, but v1's own docs carry a retirement notice — new
+#: integrations are pointed at v2. Overridable so tests and a future migration need no code edit.
+DEFAULT_RUNPOD_BASE_URL = "https://api.runpod.io/v2"
+#: Vast.ai's console REST API — the same one their CLI drives (verified July 2026).
+DEFAULT_VAST_BASE_URL = "https://console.vast.ai/api/v0"
 
 
 def load_dotenv(*paths: Path) -> None:
@@ -62,12 +68,24 @@ class Settings:
     featherless_api_key: str | None
     featherless_base_url: str
     featherless_unit_budget: int
+    runpod_api_key: str | None
+    runpod_base_url: str
+    vast_api_key: str | None
+    vast_base_url: str
     data_dir: Path
     runs_dir: Path
 
     @property
     def has_featherless(self) -> bool:
         return bool(self.featherless_api_key)
+
+    @property
+    def has_runpod(self) -> bool:
+        return bool(self.runpod_api_key)
+
+    @property
+    def has_vast(self) -> bool:
+        return bool(self.vast_api_key)
 
 
 @lru_cache(maxsize=1)
@@ -82,6 +100,16 @@ def settings() -> Settings:
             os.environ.get("FEATHERLESS_BASE_URL", "").strip() or DEFAULT_FEATHERLESS_BASE_URL
         ),
         featherless_unit_budget=_int_env("FEATHERLESS_UNIT_BUDGET", 4),
+        runpod_api_key=os.environ.get("RUNPOD_API_KEY", "").strip() or None,
+        runpod_base_url=os.environ.get("RUNPOD_BASE_URL", "").strip() or DEFAULT_RUNPOD_BASE_URL,
+        # VAST_AI_API_KEY accepted as an alias: it is what Vast's own console copy-paste suggests,
+        # so first-time setups land on it naturally. VAST_API_KEY stays canonical in the docs.
+        vast_api_key=(
+            os.environ.get("VAST_API_KEY", "").strip()
+            or os.environ.get("VAST_AI_API_KEY", "").strip()
+            or None
+        ),
+        vast_base_url=os.environ.get("VAST_BASE_URL", "").strip() or DEFAULT_VAST_BASE_URL,
         data_dir=_path_env("CORYPHAEUS_DATA_DIR", MEMBER_ROOT / "data"),
         runs_dir=_path_env("CORYPHAEUS_RUNS_DIR", MEMBER_ROOT / "runs"),
     )

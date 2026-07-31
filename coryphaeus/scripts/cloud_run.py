@@ -394,6 +394,24 @@ async def main(argv: list[str] | None = None) -> int:
             return 2
         push = ((questions_path, REMOTE_QUESTIONS),)
 
+    # The box must trust our key BEFORE the first SSH — authorized_keys cannot be delivered over
+    # the channel it gates. The public half rides provision(env=...) as PUBLIC_KEY: RunPod's stock
+    # templates consume exactly that name at boot, and the Vast backend translates it into its
+    # onstart mechanism. Account-level provider key settings are deliberately not used — per-run
+    # env keeps the whole pipeline free of account mutations.
+    key_path = Path(
+        os.environ.get("CORYPHAEUS_SSH_KEY", "").strip() or "~/.ssh/id_ed25519"
+    ).expanduser()
+    pub_path = key_path.with_suffix(key_path.suffix + ".pub")
+    if not pub_path.is_file():
+        print(
+            f"no SSH public key at {pub_path} (from CORYPHAEUS_SSH_KEY={key_path}). Generate a "
+            f'dedicated automation key: ssh-keygen -t ed25519 -N "" -f {key_path}',
+            file=sys.stderr,
+        )
+        return 2
+    ssh_public_key = pub_path.read_text(encoding="utf-8").strip()
+
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     label = f"coryphaeus-{stamp}-{args.chain}"
     run_dir = cloud_root / label
@@ -411,6 +429,7 @@ async def main(argv: list[str] | None = None) -> int:
             "FEATHERLESS_API_KEY": cfg.featherless_api_key or "",
             "CORYPHAEUS_RUNS_DIR": REMOTE_RUNS_DIR,
             "HF_HOME": "/workspace/hf",
+            "PUBLIC_KEY": ssh_public_key,
         },
         min_vram_gb=args.min_vram,
         max_price_per_hour=args.max_price,
