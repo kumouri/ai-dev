@@ -201,6 +201,16 @@ loosen `--max-price` by a few cents, drop `--min-vram` if you were above the pol
 the other provider, or wait for off-peak. This is a capacity drought, not a launcher bug — the
 same weather phase 3 observed on the worker provider.
 
+**A repeat offender in the cheap tier.** A host can *accept* the rental and never boot the
+image — pending until the provision timeout fires, sometimes for hours of retries in one night
+(2026-07-31: five straight failures, every one on a healthy-scoring host, because a reliability
+score never sees "accepted and did nothing"). Every `provisioned` event in
+`launcher-events.jsonl` records the offender's identity (`host_id`, `machine_id`); put either id
+into `CORYPHAEUS_VAST_EXCLUDE` (comma-separated) and relaunch — the offers query refuses it for
+the session. The list is deliberately not persisted: tonight's broken host may be next month's
+fine one. And do **not** dodge upward with a higher `--min-vram` instead — the next price tier
+up is Tesla V100 territory, and V100s have no bf16, so the trainer fails differently and worse.
+
 ### The budget gate refused
 
 The refusal is complete by design. Anatomy of the message:

@@ -40,7 +40,12 @@ from coryphaeus.cloud.providers.base import (
 from coryphaeus.cloud.remote import build_rsync_cmd, build_scp_cmd, build_ssh_cmd
 
 OFFER = GpuOffer(
-    provider="stub", offer_id="o-1", gpu_name="RTX 4090", vram_gb=24, price_per_hour=0.40
+    provider="stub",
+    offer_id="o-1",
+    gpu_name="RTX 4090",
+    vram_gb=24,
+    price_per_hour=0.40,
+    raw={"host_id": 299337, "machine_id": 42748},
 )
 
 
@@ -204,6 +209,19 @@ async def test_happy_path_runs_the_full_story_in_order(tmp_path):
     assert result.exit_code == 0
     assert result.instance_id == "i-001"
     assert result.actual_usd > 0.0
+
+
+async def test_provisioned_event_names_the_host_behind_the_instance(tmp_path):
+    """Instance ids change per rental; host/machine ids identify a repeat offender. 2026-07-31:
+    five same-night provision failures were unattributable because only instance_id was
+    recorded — this detail is what CORYPHAEUS_VAST_EXCLUDE gets fed from."""
+    log: list[str] = []
+    await run_launch(
+        tmp_path, log, StubProvider(log), spec_for(tmp_path), ledger_for(tmp_path, log)
+    )
+    provisioned = next(e for e in read_events(tmp_path) if e["phase"] == "provisioned")
+    assert provisioned["detail"]["host_id"] == 299337
+    assert provisioned["detail"]["machine_id"] == 42748
 
 
 async def test_remote_failure_still_terminates_and_settles(tmp_path):

@@ -34,6 +34,7 @@ Shapes verified against ``docs.vast.ai/api-reference`` (July 2026):
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from collections.abc import Awaitable, Callable, Sequence
 
@@ -84,6 +85,22 @@ def _reason(response: httpx.Response) -> str:
     msg = str(body.get("msg") or "")
     joined = f"{code}: {msg}" if code and msg else (code or msg)
     return joined[:300] or response.text[:200]
+
+
+def _excluded_ids() -> frozenset[str]:
+    """``CORYPHAEUS_VAST_EXCLUDE``: comma-separated host and/or machine ids to refuse.
+
+    A manual, session-level blocklist, born 2026-07-31: five consecutive rentals died on
+    cheap-tier hosts (pending-forever or ssh-dead) while the retry loop re-rented the cheapest
+    offer blind. The reliability floors cannot catch this — a host that *accepts* the rental and
+    never boots the image still carries a healthy reliability score. Ids match against both
+    ``host_id`` and ``machine_id`` (one host can list several machines). Read per call, not
+    cached, so an operator can export mid-session. Deliberately not persisted: a host that is
+    broken tonight may be fine next month, and a permanent list would quietly shrink the market
+    forever.
+    """
+    raw = os.environ.get("CORYPHAEUS_VAST_EXCLUDE", "")
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
 def _ssh_onstart(public_key: str) -> str:
@@ -256,6 +273,9 @@ class VastProvider:
         between them, so a silently ignored server-side filter would rent exactly the flaky
         hosts this module exists to refuse. The client-side check is the guarantee; the query
         is an optimization.
+
+        Offers on hosts/machines named in ``CORYPHAEUS_VAST_EXCLUDE`` are dropped — see
+        :func:`_excluded_ids` for why the reliability floors cannot do this job.
         """
         query: dict = {
             "type": "ondemand",
@@ -288,6 +308,7 @@ class VastProvider:
                 f"{self.name}: offer search returned non-JSON "
                 f"(http {response.status_code}): {response.text[:120]!r}"
             )
+        excluded = _excluded_ids()
         rentable: list[GpuOffer] = []
         for raw in (data or {}).get("offers") or []:
             # round(), not floor: 24564 MB is a 24 GB card, and flooring it to 23 would fail
@@ -299,6 +320,11 @@ class VastProvider:
             if vram_gb < min_vram_gb or price > max_price_per_hour:
                 continue
             if inet_down < MIN_INET_DOWN_MBPS or reliability < MIN_RELIABILITY:
+                continue
+            if excluded and (
+                str(raw.get("host_id") or "") in excluded
+                or str(raw.get("machine_id") or "") in excluded
+            ):
                 continue
             min_bid = raw.get("min_bid")
             rentable.append(

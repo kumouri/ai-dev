@@ -344,7 +344,17 @@ async def launch(
             label=spec.label,
         )
         provisioned_at = time.monotonic()
-        events.emit("provisioned", instance_id=instance.instance_id, state=instance.state.value)
+        # Host identity rides the event because instance ids change per rental: 2026-07-31's
+        # five same-night provision failures were unattributable from instance_id alone, and
+        # a repeat-offender host is invisible without it (feeds CORYPHAEUS_VAST_EXCLUDE).
+        offer_raw = offer.raw if isinstance(offer.raw, dict) else {}
+        events.emit(
+            "provisioned",
+            instance_id=instance.instance_id,
+            state=instance.state.value,
+            host_id=offer_raw.get("host_id"),
+            machine_id=offer_raw.get("machine_id"),
+        )
 
         try:
             # The hard kill. Covers everything billable — boot wait, payload, artifact pull — so

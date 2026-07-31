@@ -648,6 +648,45 @@ async def test_vast_offers_send_the_documented_server_side_filters():
     assert query["order"] == [["dph_total", "asc"]]
 
 
+async def test_vast_offers_drop_hosts_named_in_the_exclude_env(monkeypatch):
+    """CORYPHAEUS_VAST_EXCLUDE is the operator's scalpel for a host that accepts rentals and
+    never boots — a failure mode the reliability floors cannot see (2026-07-31: five straight,
+    all on healthy-scoring cheap hosts). Ids match host_id OR machine_id."""
+
+    def offer_row(offer_id: int, host_id: int, machine_id: int, price: float) -> dict:
+        return {
+            "id": offer_id,
+            "gpu_name": "RTX 3090",
+            "gpu_ram": 24564,
+            "dph_total": price,
+            "inet_down": 900.0,
+            "reliability2": 0.995,
+            "host_id": host_id,
+            "machine_id": machine_id,
+        }
+
+    payload = {
+        "offers": [
+            offer_row(101, 299337, 42748, 0.11),  # excluded by host_id
+            offer_row(102, 410852, 141095, 0.12),  # excluded by machine_id
+            offer_row(103, 3483, 8078, 0.13),  # survives
+        ]
+    }
+    monkeypatch.setenv("CORYPHAEUS_VAST_EXCLUDE", "299337, 141095")
+    provider, client = _vast(lambda r: httpx.Response(200, json=payload))
+    async with client:
+        offers = await provider.offers(min_vram_gb=24, max_price_per_hour=0.40)
+    assert [o.offer_id for o in offers] == ["103"]
+
+
+async def test_vast_offers_exclude_env_unset_changes_nothing(monkeypatch):
+    monkeypatch.delenv("CORYPHAEUS_VAST_EXCLUDE", raising=False)
+    provider, client = _vast(lambda r: httpx.Response(200, json=VAST_OFFERS))
+    async with client:
+        offers = await provider.offers(min_vram_gb=24, max_price_per_hour=0.40)
+    assert [o.offer_id for o in offers] == ["18077244", "18077391"]
+
+
 async def test_vast_provision_injects_env_and_returns_the_new_contract_id():
     seen: dict = {}
 
