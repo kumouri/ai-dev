@@ -60,6 +60,14 @@ def test_probe_only_chain_carries_the_filter_too():
     assert "--providers featherless" in build_chain(chain_args(chain="probe"), "run-label")
 
 
+def test_provision_timeout_default_survives_the_cold_pull():
+    """Pinned because it was learned twice: seven same-night 'junk hosts' all died pending at
+    exactly the old 1500s default — honest cold image pulls guillotined at 96%. If this default
+    shrinks again, it should be a deliberate decision staring at this test, not a tidy-up."""
+    args = _cloud_run.parse_args(["--provider", "fake"])
+    assert args.provision_timeout >= 2700.0
+
+
 def test_the_chain_carries_whatever_providers_were_selected():
     chain = build_chain(chain_args(worker_providers="openrouter"), "run-label")
     for stage in (s for s in chain.split(" && ") if "train_grpo.py" in s):
