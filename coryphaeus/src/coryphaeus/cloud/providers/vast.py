@@ -86,6 +86,43 @@ def _reason(response: httpx.Response) -> str:
     return joined[:300] or response.text[:200]
 
 
+def _ssh_onstart(public_key: str) -> str:
+    """Boot script granting the launcher SSH access on any Vast image; "" when there is no key.
+
+    RunPod's stock templates consume a ``PUBLIC_KEY`` env var at boot; Vast images share no
+    such convention, so the same contract is built here by hand: write the key into root's
+    ``authorized_keys`` and make sure an sshd is up. Images vary (some have ``service``, some
+    only an sshd binary, some already run one), so every arm tolerates failure — this script
+    must never be the reason a box that would have worked did not come up. The key deliberately
+    ALSO stays in ``env``: harmless duplication beats a missing key on an image that does
+    happen to know the RunPod convention.
+
+    ``onstart`` is the verified REST field name (create-instance reference, July 2026:
+    "Commands to run when instance starts", example ``env | grep _ >> /etc/environment; ...``).
+    The CLI exposes the same thing as its ``--onstart-cmd`` flag; that spelling is assumed to
+    be flag-only and is not sent.
+    """
+    if not public_key:
+        # No key → no script, rather than a benign empty one: an empty onstart still lands in
+        # the instance record and reads as intent. Omission honestly says "image defaults rule".
+        return ""
+    # POSIX single-quote escaping. Real OpenSSH public keys never contain quotes, but this is
+    # boot-time shell on a rented box — the one place to be paranoid about interpolation.
+    quoted = public_key.replace("'", "'\"'\"'")
+    return "\n".join(
+        [
+            "mkdir -p /root/.ssh",
+            "chmod 700 /root/.ssh",
+            # Append, never overwrite: an image (or a human mid-debug) may have installed keys
+            # of its own, and clobbering them is an unrecoverable lockout on a rented box.
+            f"printf '%s\\n' '{quoted}' >> /root/.ssh/authorized_keys",
+            "chmod 600 /root/.ssh/authorized_keys",
+            "service ssh start 2>/dev/null || service sshd start 2>/dev/null || true",
+            "pgrep -x sshd >/dev/null || /usr/sbin/sshd 2>/dev/null || sshd 2>/dev/null || true",
+        ]
+    )
+
+
 class VastProvider:
     """GPU rental on the Vast.ai marketplace, with network floors suited to this project."""
 
@@ -271,6 +308,9 @@ class VastProvider:
         }
         if volume_gb:
             payload["disk"] = volume_gb  # omitted → provider default (8 GB, verified July 2026)
+        onstart = _ssh_onstart(env.get("PUBLIC_KEY", ""))
+        if onstart:
+            payload["onstart"] = onstart
         response = await self._request(
             "PUT", f"/asks/{offer.offer_id}", json_body=payload, idempotent=False
         )
