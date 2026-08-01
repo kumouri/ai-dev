@@ -73,12 +73,28 @@ def test_remote_command_sources_the_runpod_env_file_before_anything():
     assert command.index("rp_environment") < command.index("git clone")
 
 
-def test_provision_timeout_default_survives_the_cold_pull():
-    """Pinned because it was learned twice: seven same-night 'junk hosts' all died pending at
-    exactly the old 1500s default — honest cold image pulls guillotined at 96%. If this default
-    shrinks again, it should be a deliberate decision staring at this test, not a tidy-up."""
+def test_provision_timeout_matches_the_bimodal_boot_distribution():
+    """Measured over 30 rentals (2026-08-01): 16 hosts reached ssh_ready in 40-90 SECONDS, 14
+    never came up at all, nothing in between. So the window's job is not patience — it is
+    failing fast enough to re-roll, while staying an order of magnitude above every observed
+    success. (An earlier default of 2700s came from the opposite reading — 'cold pulls
+    guillotined at 1500s' — which the 2700s window itself disproved by producing identical
+    failures 20 minutes later.)"""
     args = _cloud_run.parse_args(["--provider", "fake"])
-    assert args.provision_timeout >= 2700.0
+    assert 600.0 <= args.provision_timeout <= 1800.0
+
+
+def test_exit_codes_separate_verdicts_from_infrastructure():
+    """Retry wrappers branch on these, and conflating them cost real money twice on
+    2026-08-01: a gate FAIL and a dead host both exited 1, so one wrapper relaunched a finished
+    retrain and another re-ran a probe doomed to fail identically."""
+    assert (_cloud_run.EXIT_OK, _cloud_run.EXIT_INFRA) == (0, 1)
+    assert _cloud_run.EXIT_USAGE == 2
+    assert _cloud_run.EXIT_REFUSED == 3
+    assert _cloud_run.EXIT_PAYLOAD == 4
+    # The distinction that matters: "retry may help" and "the box gave you an answer" must
+    # never be the same number.
+    assert _cloud_run.EXIT_INFRA != _cloud_run.EXIT_PAYLOAD
 
 
 def test_the_chain_carries_whatever_providers_were_selected():

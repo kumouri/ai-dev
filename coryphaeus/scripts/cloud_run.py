@@ -12,6 +12,18 @@
 
 Money flows through the budget ledger (a hard monthly gate), the box is terminated from every
 exit path, and the whole run leaves a forensic events trail — see cloud/launcher.py.
+
+**Exit codes are an API**, because retry wrappers act on them and two of tonight's most
+expensive mistakes (2026-08-01) came from conflating them: a gate FAIL and a dead host both
+exited 1, so one wrapper relaunched a full retrain whose checkpoint was already home, and
+another burned rentals re-running a probe that would fail identically every time.
+
+    0  the chain ran and succeeded
+    1  INFRA failed — retrying may well work (dead host, provision timeout, SSH, pull)
+    2  usage/config error — fix the flags; retrying changes nothing
+    3  REFUSED by a budget ceiling — deliberate; retrying changes nothing
+    4  the payload RAN and exited nonzero — a VERDICT (gate FAIL, training error). The box
+       did its job; the same inputs will reproduce it.
 """
 
 from __future__ import annotations
@@ -34,6 +46,7 @@ from coryphaeus.cloud.launcher import (
     LauncherError,
     LaunchSpec,
     NoOfferError,
+    RemoteFailure,
     launch,
     pick_offer,
     worst_case_usd,
@@ -42,6 +55,13 @@ from coryphaeus.cloud.providers.base import CloudProvider, Instance
 from coryphaeus.config import REPO_ROOT, settings
 from coryphaeus.pools import load_manifest
 from coryphaeus.spend import EST_TOKENS_IN, sum_cost_usd, token_ledger
+
+#: Exit codes, documented in the module docstring above. Named because wrappers branch on them.
+EXIT_OK = 0
+EXIT_INFRA = 1
+EXIT_USAGE = 2
+EXIT_REFUSED = 3
+EXIT_PAYLOAD = 4
 
 #: Where things live ON the box. /workspace because that is where the target providers mount the
 #: persistent volume — code, caches, and artifacts all survive a container restart there.
@@ -68,13 +88,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--provision-timeout",
         type=float,
-        default=2700.0,
-        help="seconds to wait for the box to reach RUNNING before terminating. Size it to the "
-        "image: ~10 GB over a marketplace link needs 15-25 min cold — and at peak hours more. "
-        "2026-07-31: seven 'junk hosts' in one night all died at exactly the old 1500s mark, "
-        "i.e. honest cold pulls guillotined at 96%%; the two hosts that 'worked' were merely "
-        "warm. A pending box costs pennies per extra 10 minutes; a re-roll repeats the cold "
-        "pull from zero on a different host.",
+        default=900.0,
+        help="seconds to wait for the box to reach RUNNING before terminating. Boots are "
+        "BIMODAL, measured over 30 rentals (2026-08-01): 16 hosts reached ssh_ready in 40-90 "
+        "SECONDS, 14 never came up at all. Nothing lands in between, so waiting longer on a "
+        "silent host buys nothing but wall clock — the scarce resource when a run must finish "
+        "by morning. (This default was briefly raised to 2700s on the theory that cold image "
+        "pulls were being guillotined at 1500s; the 2700s window then produced the same "
+        "failures 45 minutes later instead of 25, which disproved it.)",
     )
     parser.add_argument(
         "--chain",
@@ -566,20 +587,24 @@ async def main(argv: list[str] | None = None) -> int:
             if notify is not None:
                 with contextlib.suppress(Exception):
                     await notify(f"[coryphaeus] {label}: token-budget-refused — {exc}")
-            return 1
+            return EXIT_REFUSED
 
     try:
         result = await launch(provider, spec, ledger, run_dir=run_dir, notify=notify)
     except (BudgetExceeded, LauncherError) as exc:
         # The launcher already terminated, settled, and wrote the forensic trail; the CLI's job
-        # is a readable verdict and a nonzero exit.
+        # is a readable verdict and an exit code a retry wrapper can ACT on (see EXIT_*).
         print(f"\nlaunch failed: {exc}", file=sys.stderr)
         print(f"events: {run_dir / 'launcher-events.jsonl'}", file=sys.stderr)
-        if isinstance(exc, BudgetExceeded) and notify is not None:
-            # A refusal happens before the launcher owns notifications — but an unattended
-            # launch that silently declined is exactly what notifications exist to surface.
-            with contextlib.suppress(Exception):
-                await notify(f"[coryphaeus] {label}: budget-refused — {exc}")
+        if isinstance(exc, BudgetExceeded):
+            if notify is not None:
+                # A refusal happens before the launcher owns notifications — but an unattended
+                # launch that silently declined is exactly what notifications exist to surface.
+                with contextlib.suppress(Exception):
+                    await notify(f"[coryphaeus] {label}: budget-refused — {exc}")
+            return EXIT_REFUSED
+        if isinstance(exc, RemoteFailure):
+            return EXIT_PAYLOAD
         return 1
     finally:
         if token_reserve:
