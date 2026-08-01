@@ -217,10 +217,15 @@ usually failed those floors.
 ### Provisioning times out or the offer vanishes
 
 Offers are marketplace snapshots; between listing and provisioning, someone else can take the
-box, and whole GPU classes go dry at peak hours. In order: retry (the launcher re-lists),
-loosen `--max-price` by a few cents, drop `--min-vram` if you were above the policy's need, try
-the other provider, or wait for off-peak. This is a capacity drought, not a launcher bug — the
-same weather phase 3 observed on the worker provider.
+box, and whole GPU classes go dry at peak hours. The launcher now absorbs the common case
+itself: a provision refused **for capacity** ("no instances currently available") falls through
+to the next-cheapest qualifying offer, up to three tries, each skip recorded as an
+`offer_fallback` event — the reservation is priced at the `--max-price` cap, so any qualifying
+fallback stays inside it. Schema and auth refusals do NOT fall through; they repeat identically
+on every offer and must surface as themselves. If all tried offers are dry: retry (the launcher
+re-lists), loosen `--max-price` by a few cents, drop `--min-vram` if you were above the
+policy's need, try the other provider, or wait for off-peak. This is a capacity drought, not a
+launcher bug — the same weather phase 3 observed on the worker provider.
 
 **Before blaming hosts, check whether every death happened at exactly your timeout.** Seven
 "junk hosts" in one night (2026-07-31) all died pending at precisely the then-default 1500s —
