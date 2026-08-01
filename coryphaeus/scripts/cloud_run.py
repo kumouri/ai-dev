@@ -518,6 +518,11 @@ async def main(argv: list[str] | None = None) -> int:
             **worker_keys,
             "CORYPHAEUS_RUNS_DIR": REMOTE_RUNS_DIR,
             "HF_HOME": "/workspace/hf",
+            # Classic-CDN downloads, not xet: marketplace host egress is weird per-route, and
+            # one otherwise-excellent host failed the xet-read-token endpoint identically on
+            # two rentals (2026-08-01) while everything else flowed. The classic path is the
+            # boring, universally-routable one; model downloads are a few GB once per box.
+            "HF_HUB_DISABLE_XET": "1",
             "PUBLIC_KEY": ssh_public_key,
         },
         min_vram_gb=args.min_vram,
