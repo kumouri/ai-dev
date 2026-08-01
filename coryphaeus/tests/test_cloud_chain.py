@@ -60,6 +60,19 @@ def test_probe_only_chain_carries_the_filter_too():
     assert "--providers featherless" in build_chain(chain_args(chain="probe"), "run-label")
 
 
+def test_remote_command_sources_the_runpod_env_file_before_anything():
+    """RunPod images write the container env — the provision-injected worker keys — to
+    /etc/rp_environment and source it only from ~/.bashrc, which a login shell never reads:
+    a live pod's SSH sessions showed zero worker keys while the file sat there (2026-08-01,
+    verified by hand before writing this line). Absent files are a no-op, so the sourcing is
+    provider-agnostic and must come FIRST."""
+    command = _cloud_run.build_remote_command(
+        repo_url="https://example.com/repo.git", repo_ref="develop", chain="echo hi"
+    )
+    assert "[ -f /etc/rp_environment ] && . /etc/rp_environment; " in command
+    assert command.index("rp_environment") < command.index("git clone")
+
+
 def test_provision_timeout_default_survives_the_cold_pull():
     """Pinned because it was learned twice: seven same-night 'junk hosts' all died pending at
     exactly the old 1500s default — honest cold image pulls guillotined at 96%. If this default

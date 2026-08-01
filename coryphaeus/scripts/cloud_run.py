@@ -299,6 +299,13 @@ def build_remote_command(*, repo_url: str, repo_ref: str, chain: str) -> str:
     providers surface it via profile.d) reaches the chain. Secrets never appear in this string.
     """
     ensure = (
+        # RunPod images write the container env (including the provision-injected worker keys)
+        # to /etc/rp_environment and source it ONLY from ~/.bashrc — which a login shell never
+        # reads, so `bash -l` alone arrives keyless (verified by SSH'ing a live pod,
+        # 2026-08-01: plain and login sessions both showed zero worker keys while the file sat
+        # there). Vast's equivalent is /etc/environment via our onstart. Sourcing here is the
+        # provider-agnostic union: absent files are a no-op.
+        "[ -f /etc/rp_environment ] && . /etc/rp_environment; "
         '[ -d "$REPO_DIR/.git" ] || git clone "$REPO_URL" "$REPO_DIR"; '
         f'exec bash "$REPO_DIR/coryphaeus/cloud/bootstrap.sh" bash -c {shlex.quote(chain)}'
     )
