@@ -21,6 +21,7 @@ import pytest
 from coryphaeus.cloud.budget import BudgetExceeded, BudgetLedger
 from coryphaeus.cloud.launcher import (
     CANONICAL_PHASES,
+    ArtifactPullError,
     LauncherError,
     LaunchSpec,
     NoOfferError,
@@ -132,6 +133,21 @@ def make_pull(log, *, exit_code=0):
     async def _pull(instance, remote_dir, local_dir):
         log.append("pull")
         return exit_code
+
+    return _pull
+
+
+def make_wedging_pull(log, *, hang_first=999):
+    """A pull that wedges (awaits forever) on its first ``hang_first`` calls, then succeeds —
+    the 2026-07-31 failure shape, where the transfer process sat six hours after delivering."""
+    calls = {"n": 0}
+
+    async def _pull(instance, remote_dir, local_dir):
+        calls["n"] += 1
+        log.append("pull")
+        if calls["n"] <= hang_first:
+            await asyncio.Event().wait()
+        return 0
 
     return _pull
 
@@ -268,6 +284,67 @@ async def test_wall_clock_hard_kill_terminates_and_settles_at_capped_cost(tmp_pa
     assert settled[0]["detail"]["billable_hours"] == pytest.approx(spec.max_hours)
     # And the reservation is gone — nothing left counting against the month.
     assert ledger.month_spend().reserved_usd == 0.0
+
+
+async def test_wedged_pull_is_cut_retried_and_artifacts_on_disk_win(tmp_path):
+    """The 2026-07-31 shape: rsync delivered everything, then the process sat six hours until
+    the max_hours axe billed the whole window. Now: each attempt is cut at pull_timeout_s, the
+    retry gets one more chance, and after two timeouts the local disk gets the last word — files
+    present → the run proceeds and names exactly what landed, instead of failing a run whose
+    deliverable is sitting on disk."""
+    log: list[str] = []
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "rollouts.jsonl").write_text('{"cost_usd": 0.1}\n', encoding="utf-8")
+    spec = spec_for(tmp_path, pull_timeout_s=0.05)
+    result = await run_launch(
+        tmp_path, log, StubProvider(log), spec, ledger_for(tmp_path, log),
+        remote_pull=make_wedging_pull(log),
+    )  # fmt: skip
+    assert result.exit_code == 0
+    assert log.count("pull") == 2  # cut, retried once, never a third
+    assert log.index("terminate") < log.index("settle")
+    phases = [e["phase"] for e in read_events(tmp_path)]
+    assert phases.count("pull_started") == 2
+    assert phases.count("pull_timeout") == 2
+    partial = next(e for e in read_events(tmp_path) if e["phase"] == "pull_timeout_partial")
+    assert partial["detail"]["files"] == 1
+    assert partial["detail"]["bytes"] > 0
+
+
+async def test_wedged_pull_with_nothing_on_disk_is_a_failed_run(tmp_path):
+    """Same wedge, but nothing ever landed: the deliverable is lost and saying otherwise would
+    be a lie. Terminate + settle still run — a failed pull must never become a billing leak."""
+    log: list[str] = []
+    ledger = ledger_for(tmp_path, log)
+    spec = spec_for(tmp_path, pull_timeout_s=0.05)
+    with pytest.raises(ArtifactPullError, match="timed out twice"):
+        await run_launch(
+            tmp_path, log, StubProvider(log), spec, ledger,
+            remote_pull=make_wedging_pull(log),
+        )  # fmt: skip
+    assert "terminate" in log and "settle" in log
+    assert ledger.month_spend().reserved_usd == 0.0
+
+
+async def test_pull_that_recovers_on_the_second_attempt_is_a_normal_success(tmp_path):
+    """rsync resumes: a near-end wedge on attempt one completes in moments on attempt two."""
+    log: list[str] = []
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "model.safetensors").write_bytes(b"weights")
+    spec = spec_for(tmp_path, pull_timeout_s=0.05)
+    result = await run_launch(
+        tmp_path, log, StubProvider(log), spec, ledger_for(tmp_path, log),
+        remote_pull=make_wedging_pull(log, hang_first=1),
+    )  # fmt: skip
+    assert result.exit_code == 0
+    assert log.count("pull") == 2
+    events = read_events(tmp_path)
+    assert [e["phase"] for e in events].count("pull_timeout") == 1
+    pulled = next(e for e in events if e["phase"] == "artifacts_pulled")
+    assert pulled["detail"]["files"] == 1
+    assert pulled["detail"]["bytes"] == len(b"weights")
 
 
 async def test_keyboard_interrupt_mid_run_terminates_and_settles(tmp_path):
