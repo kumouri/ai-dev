@@ -258,10 +258,13 @@ class RunPodProvider:
             "gpu": {"id": offer.offer_id, "count": 1},
             "env": dict(env),
             "cloud": "COMMUNITY",
-            # Unset means "any CUDA version is acceptable" (docs, verbatim) — which is how the
-            # first post-402 validate drew a 12.4-driver relic that torch refused after a fully
-            # billed bootstrap. The floor is torch's, shared across backends (base.min_cuda).
-            "allowedCudaVersions": _allowed_cuda_versions(),
+            # NO CUDA floor on this dialect, and not for lack of trying: the DOCUMENTED RunPod
+            # API (rest.runpod.io PodCreateInput) accepts allowedCudaVersions, but this endpoint
+            # — the live-bisected api.runpod.io/v2 dialect — 422s the field by name
+            # ("additional properties 'allowedCudaVersions' not allowed", 2026-08-01). Until the
+            # backend migrates to the documented dialect, an old-driver draw here is a cheap
+            # fast failure (~$0.008, ~3 min: torch refuses, launcher terminates + settles), and
+            # retries re-roll the host. _allowed_cuda_versions() stays for the migration.
             # SSH is how the launcher reaches the box; declaring 22/tcp is what makes a public
             # mapping appear in runtime.ports for describe() to read back.
             "ports": ["22/tcp"],
