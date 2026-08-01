@@ -8,6 +8,7 @@ and to sweep the account for orphans afterward. Anything a specific provider nee
 from __future__ import annotations
 
 import enum
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
@@ -16,6 +17,27 @@ from typing import Protocol, runtime_checkable
 class ProviderError(RuntimeError):
     """A provider API call failed in a way retries did not fix. Message carries the provider's
     own reason — a refused provision must be explainable to a human reading a log at 7am."""
+
+
+#: Minimum CUDA version a host's driver must support. This is TORCH'S constraint, not any
+#: provider's — the pinned wheel refuses older drivers after a fully-billed bootstrap — which is
+#: why it lives here and every backend enforces it its own way (Vast filters offers on
+#: ``cuda_max_good``; RunPod sends ``allowedCudaVersions``). Both providers grew the same
+#: failure the same night (2026-07-31/08-01: a 12.8 Vast host, then a 12.4 RunPod host). Raise
+#: in lockstep with torch's CUDA build; override via ``CORYPHAEUS_MIN_CUDA``
+#: (``CORYPHAEUS_VAST_MIN_CUDA`` is honored as an alias — it shipped first).
+DEFAULT_MIN_CUDA = 12.9
+
+
+def min_cuda() -> float:
+    raw = (
+        os.environ.get("CORYPHAEUS_MIN_CUDA", "").strip()
+        or os.environ.get("CORYPHAEUS_VAST_MIN_CUDA", "").strip()
+    )
+    try:
+        return float(raw) if raw else DEFAULT_MIN_CUDA
+    except ValueError:
+        return DEFAULT_MIN_CUDA
 
 
 def body_json(response) -> dict | list | None:

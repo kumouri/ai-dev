@@ -224,11 +224,14 @@ raise it before concluding the market is broken.
 
 **"NVIDIA driver too old" on the very first training step.** The image's CUDA toolkit is not
 the constraint — the *host driver* is, and marketplace hosts run whatever driver they run. A
-host below the pinned torch's CUDA build passes every network/reliability floor, bills a full
-bootstrap (~50 minutes at rental rates, observed 2026-07-31), and then refuses in the first
-step. `offers()` now filters on Vast's `cuda_max_good` (floor `CORYPHAEUS_VAST_MIN_CUDA`,
-default 12.9); if this error still appears, the floor has drifted behind the torch pin — raise
-it in lockstep, not on a hunch.
+host below the pinned torch's CUDA build passes every other floor, bills a full bootstrap, and
+then refuses in the first step — **both providers sold us one the same night** (a 12.8 Vast
+host, then a 12.4 RunPod host). The floor is torch's, shared across backends
+(`CORYPHAEUS_MIN_CUDA`, default 12.9; the older `CORYPHAEUS_VAST_MIN_CUDA` spelling is honored
+as an alias): Vast filters offers on `cuda_max_good`, RunPod sends `allowedCudaVersions` on
+create (unset means "any CUDA version is acceptable" — the docs' words, and the trap). If this
+error still appears, the floor has drifted behind the torch pin — raise it in lockstep, not on
+a hunch.
 
 **A repeat offender in the cheap tier.** A host can *accept* the rental and never boot the
 image — pending until the provision timeout fires, sometimes for hours of retries in one night
