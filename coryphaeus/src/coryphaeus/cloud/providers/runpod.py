@@ -19,16 +19,19 @@ at ``docs.runpod.io/api-reference-v2`` (verified July 2026):
 * ``DELETE /pods/{id}`` → 204, or 404 once the pod no longer exists.
 * Errors are problem-details-shaped: ``{"title", "status", "detail", "errors": [...]}``.
 
-Community cloud is the default quote on purpose: the training reward is network-bound and the
-GPU idles 50-70% of every step, so the right rental is the cheapest card that fits the policy —
-and community pricing is the cheap half of the catalog (a 4090 listed ~$0.34/hr community vs
-~$0.69 secure when checked, July 2026). ``offers()`` therefore quotes community prices only and
-skips secure-only cards.
+Community cloud is the default on purpose: the training reward is network-bound and the GPU
+idles 50-70% of every step, so the right rental is the cheapest card that fits the policy — and
+community pricing is the cheap half of the catalog (a 4090 listed ~$0.34/hr community vs ~$0.69
+secure when checked, July 2026). The tier is a pay-per-use reliability knob, not a constant:
+``CORYPHAEUS_RUNPOD_CLOUD=SECURE`` flips the catalog query, the quoted price, and the provision
+payload together (see ``_cloud_tier``), so retry wrappers can escalate to datacenter hosts
+mid-loop after community-lottery failures.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Awaitable, Callable, Sequence
 
 import httpx
@@ -36,6 +39,20 @@ import httpx
 from ...config import settings
 from ...workers.base import TRANSIENT_STATUSES
 from .base import GpuOffer, Instance, InstanceState, ProviderError, body_json, min_cuda
+
+
+def _cloud_tier() -> str:
+    """``COMMUNITY`` (default) or ``SECURE`` — reliability as a pay-per-use knob.
+
+    Community is the cheap half of the marketplace and carries marketplace weather (old
+    drivers, sold-out cards); Secure is RunPod's datacenter tier at roughly 2× the $/hr with
+    overwhelmingly modern hosts. Env-driven (``CORYPHAEUS_RUNPOD_CLOUD``) rather than a
+    constructor arg so retry wrappers can ESCALATE mid-loop: try the cheap lottery first, then
+    pay double for a datacenter host instead of failing the night. Read per call, not cached.
+    """
+    raw = os.environ.get("CORYPHAEUS_RUNPOD_CLOUD", "").strip().upper()
+    return raw if raw in ("COMMUNITY", "SECURE") else "COMMUNITY"
+
 
 #: The CUDA versions RunPod's create schema accepts (docs, August 2026). The shared driver
 #: floor selects the acceptable suffix of this list.
@@ -199,17 +216,20 @@ class RunPodProvider:
         )
 
     async def offers(self, *, min_vram_gb: int, max_price_per_hour: float) -> Sequence[GpuOffer]:
-        """Community-cloud GPU types meeting the floors, cheapest first.
+        """GPU types on the selected cloud tier meeting the floors, cheapest first.
 
         Cards whose ``availability`` is ``NONE`` are dropped — the contract promises *currently
         rentable* offers, and a sold-out card would just make provision() fail slower. Cards
-        with no community price (secure-only) are dropped for the same reason this backend
-        exists: community pricing is the cheap half of the catalog.
+        with no price on the selected tier are dropped for the same reason. The tier drives the
+        query, the price field read, AND the provision payload from one source (`_cloud_tier`) —
+        picking on the community price while paying the secure one would corrupt the
+        reservation math.
         """
+        tier = _cloud_tier()
         response = await self._request(
             "GET",
             "/catalog/gpus",
-            params={"include": "AVAILABILITY", "cloud": "COMMUNITY", "product": "POD"},
+            params={"include": "AVAILABILITY", "cloud": tier, "product": "POD"},
         )
         if response.status_code >= 400:
             raise ProviderError(
@@ -224,11 +244,14 @@ class RunPodProvider:
             )
         rentable: list[GpuOffer] = []
         for gpu in (data or {}).get("gpus") or []:
-            community = (gpu.get("price") or {}).get("community")
-            if community is None or gpu.get("availability") == "NONE":
+            # Both keys verified against the v2 OpenAPI spec (July 2026): $/hr rides
+            # price.community / price.secure. A card with no price on the selected tier
+            # (e.g. secure-only hardware seen from COMMUNITY) is not rentable there.
+            tier_price = (gpu.get("price") or {}).get(tier.lower())
+            if tier_price is None or gpu.get("availability") == "NONE":
                 continue
             vram_gb = int(gpu.get("memory") or 0)
-            price = float(community)
+            price = float(tier_price)
             if vram_gb < min_vram_gb or price > max_price_per_hour:
                 continue
             rentable.append(
@@ -257,7 +280,7 @@ class RunPodProvider:
             "image": image,
             "gpu": {"id": offer.offer_id, "count": 1},
             "env": dict(env),
-            "cloud": "COMMUNITY",
+            "cloud": _cloud_tier(),
             # NO CUDA floor on this dialect, and not for lack of trying: the DOCUMENTED RunPod
             # API (rest.runpod.io PodCreateInput) accepts allowedCudaVersions, but this endpoint
             # — the live-bisected api.runpod.io/v2 dialect — 422s the field by name

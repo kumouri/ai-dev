@@ -376,6 +376,37 @@ async def test_runpod_offers_filter_sort_and_quote_community_pricing():
     assert all(o.provider == "runpod" for o in offers)
 
 
+async def test_runpod_secure_tier_drives_query_price_and_payload_together(monkeypatch):
+    """Reliability as a pay-per-use knob: CORYPHAEUS_RUNPOD_CLOUD=SECURE must flip the catalog
+    query, the price field read, AND the provision payload from one source — quoting the
+    community price while paying the secure one would corrupt the reservation math. On SECURE
+    the sold-out-on-community H100 becomes rentable and everything quotes ~2x."""
+    monkeypatch.setenv("CORYPHAEUS_RUNPOD_CLOUD", "secure")  # case-insensitive on purpose
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/catalog/gpus"):
+            seen["params"] = dict(request.url.params)
+            return httpx.Response(200, json=RUNPOD_CATALOG)
+        seen["body"] = json.loads(request.read())
+        return httpx.Response(201, json=_runpod_pod("PROVISIONING"))
+
+    provider, client = _runpod(handler)
+    async with client:
+        offers = await provider.offers(min_vram_gb=24, max_price_per_hour=3.00)
+        await provider.provision(
+            offers[0], image=IMAGE, env=ENV, volume_gb=40, label="coryphaeus-secure"
+        )
+
+    assert seen["params"]["cloud"] == "SECURE"
+    assert [(o.gpu_name, o.price_per_hour) for o in offers] == [
+        ("RTX 4090", 0.69),
+        ("A100 80GB PCIe", 1.64),
+        ("H100 PCIe", 2.39),  # secure-only card: invisible on COMMUNITY, rentable here
+    ]
+    assert seen["body"]["cloud"] == "SECURE"
+
+
 async def test_runpod_provision_sends_the_documented_body_with_env_injected():
     seen: dict = {}
 
