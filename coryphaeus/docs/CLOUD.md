@@ -41,6 +41,14 @@ Two providers, deliberately — one is a dependency, two is a market:
    offers live.
 2. **Vast.ai** — same shape: account, credit, API key, SSH public key.
 
+**Reliability is a pay-per-use knob, not a third provider.** RunPod's Secure tier
+(`CORYPHAEUS_RUNPOD_CLOUD=SECURE`) rents datacenter hosts at roughly 2× the community $/hr —
+one env var, no new accounts. The intended pattern is *escalation*: retry wrappers try the
+cheap community lottery first and export the tier mid-loop after repeated marketplace failures,
+paying double for one night's reliability instead of failing it. A genuinely separate third
+provider (Lambda-class) only earns its integration cost when runs get long enough that an
+interruption loses real money — revisit at 7B.
+
 Keys go in `.env` at the repo root (see [`.env.example`](../../.env.example)) and **nowhere
 else** — never in code, never in a tracked file, never in a shell history you might paste:
 
