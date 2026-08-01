@@ -50,12 +50,21 @@ CANONICAL_PHASES = (
     "ssh_ready",
     "payload_started",
     "payload_finished",
+    "pull_started",
     "artifacts_pulled",
     "terminate_requested",
     "terminated",
     "settled",
     "launch_finished",
 )
+
+#: Ceiling on ONE pull attempt, not the whole retrieval. 90 minutes, not 30: the healthiest pull
+#: of 2026-07-31 took 78 minutes for ~6 GB over a marketplace uplink — while the wedged one sat
+#: SIX HOURS after transferring everything, eating the rest of the max_hours window and turning
+#: the hard kill into the pull's de-facto (and very expensive) timeout. One retry follows a
+#: timeout: the pull is rsync underneath, so a near-end wedge resumes and completes in minutes.
+#: Override via ``CORYPHAEUS_PULL_TIMEOUT_S`` (wired in cloud_run.py).
+DEFAULT_PULL_TIMEOUT_S = 5400.0
 
 
 class LauncherError(RuntimeError):
@@ -181,6 +190,8 @@ class LaunchSpec:
     remote_artifact_dir: str = "/workspace/runs"
     #: Local destination for the pull; None skips artifact retrieval entirely.
     artifact_dir: Path | None = None
+    #: Per-attempt ceiling on the artifact pull — see DEFAULT_PULL_TIMEOUT_S for the sizing story.
+    pull_timeout_s: float = DEFAULT_PULL_TIMEOUT_S
     #: (local file, remote path) pairs copied up before the payload — for run inputs like
     #: calibrated question files that live under gitignored runs/ and so cannot be cloned.
     push: tuple[tuple[Path, str], ...] = ()
@@ -233,6 +244,22 @@ async def _wait_until_running(
         current = await provider.describe(instance.instance_id)
 
 
+def _artifact_footprint(artifact_dir: Path) -> tuple[int, int]:
+    """(files, bytes) actually on local disk — the honest measure of what a pull delivered.
+
+    Needed because the pull *process* and the pull *outcome* can disagree: the 2026-07-31 wedge
+    sat six hours after rsync had already written all 5.7 GB. What is on disk is the ground
+    truth; the transfer's exit status is only a claim about it.
+    """
+    files = 0
+    size = 0
+    for path in artifact_dir.rglob("*"):
+        if path.is_file():
+            files += 1
+            size += path.stat().st_size
+    return files, size
+
+
 async def _pull_artifacts(
     events: EventLog,
     remote_pull: RemotePull,
@@ -240,28 +267,75 @@ async def _pull_artifacts(
     spec: LaunchSpec,
     exit_code: int,
 ) -> None:
-    """Pull artifacts down — after failures too.
+    """Pull artifacts down — after failures too, and never for longer than the pull window.
 
     terminate wipes the box's disk, and on a --resume chain the checkpoints sitting there are the
     difference between resuming at hour 7 and re-paying hours 0-7. So: payload succeeded → a pull
     failure is fatal (the artifacts are the deliverable); payload failed → the pull is best-effort
     forensics and must not mask the real error.
+
+    Each attempt is bounded by ``spec.pull_timeout_s`` — before this, a wedged transfer's only
+    ceiling was the max_hours hard kill, which billed the whole remaining window for idle
+    (observed twice, 2026-07-31). A timeout gets ONE retry (rsync resumes, so a near-end wedge
+    finishes in minutes), and after a second timeout the local disk gets the last word: artifacts
+    present → the run proceeds with a ``pull_timeout_partial`` event naming exactly what landed;
+    nothing present on a successful payload → the deliverable is lost and that is a failed run.
     """
     if spec.artifact_dir is None:
         return
-    try:
-        pull_rc = await remote_pull(instance, spec.remote_artifact_dir, spec.artifact_dir)
-    except Exception as exc:
+    for attempt in (1, 2):
+        events.emit("pull_started", attempt=attempt, timeout_s=spec.pull_timeout_s)
+        started = time.monotonic()
+        try:
+            async with asyncio.timeout(spec.pull_timeout_s):
+                pull_rc = await remote_pull(instance, spec.remote_artifact_dir, spec.artifact_dir)
+        except TimeoutError:
+            events.emit(
+                "pull_timeout",
+                attempt=attempt,
+                elapsed_s=round(time.monotonic() - started, 1),
+            )
+            continue
+        except Exception as exc:
+            if exit_code == 0:
+                raise ArtifactPullError(f"artifact pull raised: {exc!r}") from exc
+            events.emit("artifact_pull_failed", error=repr(exc))
+            return
+        if pull_rc == 0:
+            files, size = _artifact_footprint(spec.artifact_dir)
+            events.emit(
+                "artifacts_pulled",
+                dest=str(spec.artifact_dir),
+                elapsed_s=round(time.monotonic() - started, 1),
+                files=files,
+                bytes=size,
+            )
+            return
         if exit_code == 0:
-            raise ArtifactPullError(f"artifact pull raised: {exc!r}") from exc
-        events.emit("artifact_pull_failed", error=repr(exc))
-        return
-    if pull_rc == 0:
-        events.emit("artifacts_pulled", dest=str(spec.artifact_dir))
-    elif exit_code == 0:
-        raise ArtifactPullError(f"artifact pull exited {pull_rc}")
-    else:
+            raise ArtifactPullError(f"artifact pull exited {pull_rc}")
         events.emit("artifact_pull_failed", exit_code=pull_rc)
+        return
+
+    # Two timeouts. The transfer process never answered — but the files it may have already
+    # written are real either way, and terminate is about to wipe the only other copy.
+    files, size = _artifact_footprint(spec.artifact_dir)
+    if files and exit_code == 0:
+        events.emit(
+            "pull_timeout_partial",
+            dest=str(spec.artifact_dir),
+            files=files,
+            bytes=size,
+        )
+        return
+    if exit_code == 0:
+        raise ArtifactPullError(
+            f"artifact pull timed out twice ({spec.pull_timeout_s:.0f}s per attempt) with "
+            "nothing in the local artifact dir — the deliverable is lost"
+        )
+    events.emit(
+        "artifact_pull_failed",
+        error=f"timed out twice ({spec.pull_timeout_s:.0f}s per attempt); {files} file(s) on disk",
+    )
 
 
 async def launch(

@@ -30,6 +30,7 @@ from pathlib import Path
 
 from coryphaeus.cloud.budget import BudgetExceeded, BudgetLedger
 from coryphaeus.cloud.launcher import (
+    DEFAULT_PULL_TIMEOUT_S,
     LauncherError,
     LaunchSpec,
     NoOfferError,
@@ -526,6 +527,11 @@ async def main(argv: list[str] | None = None) -> int:
         provision_timeout_s=args.provision_timeout,
         remote_artifact_dir=REMOTE_RUNS_DIR,
         artifact_dir=run_dir / "artifacts",
+        # Env-tunable, not a flag: the pull window is infrastructure weather, not an experiment
+        # parameter, and the frozen overnight wrappers should inherit a fix without re-editing.
+        pull_timeout_s=float(
+            os.environ.get("CORYPHAEUS_PULL_TIMEOUT_S", "").strip() or DEFAULT_PULL_TIMEOUT_S
+        ),
         push=push,
     )
 

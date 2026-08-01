@@ -388,13 +388,18 @@ keeps a healthy reliability score); a `cuda_max_good` driver floor (a stale-driv
 full bootstrap before torch refuses it); and the provision timeout raised to 2700 s after seven
 "junk hosts" turned out to be honest cold image pulls guillotined at exactly the old 1500 s mark.
 
-**Known open issue — the post-payload pull can hang, twice observed.** Take 6's launcher hung
-after its payload finished (killed by hand, orphan-swept), and the OR arm's pull wedged for six
-hours *after transferring everything* — the wall-clock hard kill terminated the box, correctly
-but expensively (~$0.45 of idle), and the wrapper's rc=1 then triggered a redundant relaunch that
+**The post-payload pull hang, twice observed — now fixed.** Take 6's launcher hung after its
+payload finished (killed by hand, orphan-swept), and the OR arm's pull wedged for six hours
+*after transferring everything* — the wall-clock hard kill terminated the box, correctly but
+expensively (~$0.45 of idle), and the wrapper's rc=1 then triggered a redundant relaunch that
 had to be interrupted by hand (the SIGINT path terminated + settled both ledgers cleanly, which
-was good to see proven live). The pull needs its own timeout and a partial-pull-tolerant retry,
-so a wedged rsync costs minutes, not the remaining hard-kill window.
+was good to see proven live). The pull now has its own per-attempt window
+(`CORYPHAEUS_PULL_TIMEOUT_S`, default 90 min — the *healthiest* pull of the night took 78) with
+one retry (rsync resumes, so a near-end wedge completes in minutes), and after a second timeout
+**the local disk gets the last word**: artifacts present → the run proceeds, with a
+`pull_timeout_partial` event naming exactly what landed; nothing present on a successful
+payload → a failed run, honestly. The transfer's exit status is only a claim; what is on disk
+is the ground truth — which is precisely what the six-hour wedge demonstrated.
 
 ### What reading the installed TRL actually caught
 

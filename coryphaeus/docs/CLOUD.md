@@ -150,6 +150,19 @@ ledger's rule: over-count, never under-count). The sweep is idempotent and free 
 after any crash, network drop, or moment of doubt, once per provider, and a stale-looking budget
 usually rights itself here.
 
+### The artifact pull stalls (or seems to)
+
+The pull is bounded per attempt (`CORYPHAEUS_PULL_TIMEOUT_S`, default 5400 s — sized so a
+legitimately slow multi-GB checkpoint pull over a marketplace uplink fits; the reference healthy
+pull took 78 minutes) and retried once — rsync resumes, so the retry after a near-end wedge
+completes in minutes. After a second timeout the launcher checks the local artifact dir: files
+present → the run proceeds and `pull_timeout_partial` records exactly how many files and bytes
+landed (verify completeness before trusting a partial pull — but note the observed wedge had
+delivered *everything* before hanging); nothing present after a successful payload → the run
+fails with `ArtifactPullError`, because the deliverable is lost. Either way the box is
+terminated and settled — a stuck transfer costs minutes of patience, never the remaining
+`max_hours` window.
+
 ## Checkpoints and resume
 
 The trainer checkpoints every 10 steps (`save_steps=10`, ~≤80 min of exposure at observed step
