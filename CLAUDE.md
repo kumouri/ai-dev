@@ -55,6 +55,7 @@ uv run ruff check . && uv run ruff format --check .
 uv run python coryphaeus/scripts/smoke_workers.py --local  # ping the local Ollama pool
 uv run python coryphaeus/scripts/smoke_workers.py --openrouter  # pinned seats + cost receipt (~$0.001)
 uv run python coryphaeus/scripts/run_baseline.py --help
+uv run python coryphaeus/scripts/eval_trained.py --help  # score a trained checkpoint in the same harness (needs GPU + train extra)
 ```
 
 ## Gotchas
