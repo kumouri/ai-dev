@@ -399,9 +399,10 @@ async def test_runpod_provision_sends_the_documented_body_with_env_injected():
     assert body["cloud"] == "COMMUNITY"
     assert body["mounts"] == {"persistent": {"size": 40, "path": "/workspace"}}
     assert "22/tcp" in body["ports"]
-    # Unset means "any CUDA version" (docs, verbatim) — how the first post-402 validate drew a
-    # 12.4-driver relic. The shared torch floor must always ride the request.
-    assert body["allowedCudaVersions"] == ["12.9", "13.0"]
+    # The v2 dialect 422s allowedCudaVersions by name (live, 2026-08-01) even though the
+    # DOCUMENTED PodCreateInput accepts it — so it must NOT ride this request until the backend
+    # migrates dialects. An old-driver draw is a cheap fast failure; a 422 is no rental at all.
+    assert "allowedCudaVersions" not in body
     # `disk` is mandatory in practice though optional in the schema: a body without it 400s as
     # "no pod configuration parameters" (bisected live 2026-07-31). This pin keeps it mandatory
     # in our payload forever.
