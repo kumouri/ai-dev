@@ -1,23 +1,32 @@
-"""RunPod backend, on REST API v2 (``https://api.runpod.io/v2``, verified July 2026).
+"""RunPod backend — deliberately HYBRID across RunPod's two live REST dialects.
 
-RunPod has had three API generations: the original GraphQL API (``api.runpod.io/graphql``), REST
-v1 (``rest.runpod.io/v1``), and REST v2. As of July 2026 the v1 docs carry an explicit
-retirement notice ("deprecated and will be retired in the near future") and point new
-integrations at v2 — so this backend speaks v2 only. Every path, field name and enum below was
-read from the live OpenAPI spec (``https://api.runpod.io/v2/openapi.json``) and the v2 reference
-at ``docs.runpod.io/api-reference-v2`` (verified July 2026):
+* **Catalog** (``offers()``): ``api.runpod.io/v2`` — ``GET /catalog/gpus`` → ``{"gpus": [{"id",
+  "name", "memory", "price": {"secure", "community"}, "availability"}]}``. Verified July 2026
+  against the v2 OpenAPI spec; tier-priced, works, kept.
+* **Pod lifecycle** (provision/describe/list/terminate): ``rest.runpod.io/v1`` — the DOCUMENTED
+  ``PodCreateInput`` dialect (docs.runpod.io api-reference), live-verified 2026-08-01. This is
+  the only dialect that accepts ``allowedCudaVersions``, the field that stops the marketplace
+  selling us a driver our torch refuses (the v2 pods endpoint 422s it by name). Both dialects
+  read the SAME pods — proven live: a v2-created pod appears, identically shaped, in the v1
+  list.
 
-* ``GET /catalog/gpus`` → ``{"gpus": [{"id", "name", "memory", "price": {"secure",
-  "community"}, "availability"}]}``. ``memory`` is VRAM in GB, prices are $/hr, and
-  ``availability`` (``NONE|LOW|MEDIUM|HIGH``) appears only when ``include=AVAILABILITY``.
-* ``POST /pods`` → 201 + the Pod object. Request: ``name``, ``image``, ``gpu: {id, count}``,
-  ``env`` (flat dict), ``cloud`` (``SECURE|COMMUNITY``), ``ports`` (``["22/tcp"]``),
-  ``mounts: {"persistent": {"size", "path"}}``.
-* ``GET /pods/{id}`` → Pod: ``status`` in ``PROVISIONING|STARTING|RUNNING|EXITED|ERROR|
-  TERMINATED``, ``cost`` ($/hr), and ``runtime`` (null until RUNNING) carrying ``uptime``
-  seconds and ``ports: [{"private", "public", "type", "ip"}]``.
-* ``DELETE /pods/{id}`` → 204, or 404 once the pod no longer exists.
-* Errors are problem-details-shaped: ``{"title", "status", "detail", "errors": [...]}``.
+The v1 shapes, live-verified 2026-08-01:
+
+* ``POST /pods`` → **201 + the Pod object**. Request: ``name``, ``imageName``,
+  ``gpuTypeIds: [id]``, ``gpuCount``, ``cloudType`` (``SECURE|COMMUNITY``), ``env``,
+  ``ports: ["22/tcp"]``, ``containerDiskInGb``, ``volumeInGb`` + ``volumeMountPath``,
+  ``allowedCudaVersions``. **EVERY field has a server-side default** — an empty body 201s and
+  rents a $0.69/hr Secure 4090 (paid ~$0.09 to learn this; the pod was terminated in minutes).
+  Never send a partial body expecting a validation error.
+* ``GET /pods/{id}`` / ``GET /pods`` (bare ARRAY, not an envelope) → Pod: ``desiredStatus`` in
+  ``RUNNING|EXITED|TERMINATED`` (no PROVISIONING/STARTING class — a pod is "RUNNING" by desire
+  from the moment of creation), ``publicIp`` (nullable) + ``portMappings`` (``{"22": 12345}``)
+  arriving only once the container is actually up, ``costPerHr``, ``machineId`` + ``machine``
+  (host forensics), ``lastStartedAt``. **List bodies carry each pod's full ``env`` — secrets —
+  so raw list output must never be logged.**
+* ``DELETE /pods/{id}`` → 204, or ``{"error": "pod not found", "status": 404}`` once gone.
+* v2 errors are problem-details-shaped (``{"title", "status", "detail", "errors"}``); v1 errors
+  are ``{"error", "status"}`` or a bare ``[{"error": ...}]`` array — ``_reason`` reads all.
 
 Community cloud is the default on purpose: the training reward is network-bound and the GPU
 idles 50-70% of every step, so the right rental is the cheapest card that fits the policy — and
@@ -33,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, datetime
 
 import httpx
 
@@ -70,16 +80,35 @@ def _allowed_cuda_versions() -> list[str]:
     return allowed or [_CUDA_VERSIONS[-1]]
 
 
+def _parse_pod_timestamp(raw: str) -> datetime | None:
+    """Parse the v1 dialect's timestamp shape: ``2026-08-01 04:14:06.75 +0000 UTC``.
+
+    A Go-style stamp — fractional seconds of varying width, a numeric offset, AND a trailing
+    zone name. Tolerant on purpose (fraction may be absent); anything unparseable is None, and
+    the caller falls back to the ledger's own estimate rather than guessing.
+    """
+    cleaned = raw.strip().removesuffix("UTC").strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f %z", "%Y-%m-%d %H:%M:%S %z"):
+        try:
+            return datetime.strptime(cleaned, fmt)
+        except ValueError:
+            continue
+    return None
+
+
 class MissingApiKey(RuntimeError):
     """No ``RUNPOD_API_KEY`` available. Raised at construction, not mid-run."""
 
 
-#: Pod ``status`` → normalized state. EXITED and ERROR both mean "the container died and will
-#: not come back on its own", which for the launcher is the same decision: stop waiting, clean
-#: up — so both map to STOPPED rather than pretending one is more recoverable than the other.
+#: Pod ``desiredStatus`` → normalized state. The v1 dialect has no PROVISIONING/STARTING class
+#: — a pod is "RUNNING" by desire from the moment of creation — so the PENDING distinction is
+#: synthesized in ``_to_instance`` from the absence of an SSH endpoint. EXITED and ERROR both
+#: mean "the container died and will not come back on its own": STOPPED either way. The v2-era
+#: keys are kept as harmless aliases (both dialects read the same pods).
 _POD_STATES = {
     "PROVISIONING": InstanceState.PENDING,
     "STARTING": InstanceState.PENDING,
+    "CREATED": InstanceState.PENDING,
     "RUNNING": InstanceState.RUNNING,
     "EXITED": InstanceState.STOPPED,
     "ERROR": InstanceState.STOPPED,
@@ -88,17 +117,22 @@ _POD_STATES = {
 
 
 def _reason(response: httpx.Response) -> str:
-    """Pull RunPod's own title/detail out of a problem-details body, for a legible log line.
+    """Pull RunPod's own words out of an error body, for a legible log line.
 
     A refused provision must be explainable to a human reading a log at 7am; "http 422" alone
-    tells them nothing, the API's ``detail`` usually tells them everything.
+    tells them nothing. Handles all three observed error shapes: v2 problem-details
+    (``{"title", "detail", "errors"}``), v1 (``{"error", "status"}``), and v1's bare
+    ``[{"error": ...}]`` array.
     """
     try:
         body = response.json() or {}
     except ValueError:
         return response.text[:200]
+    if isinstance(body, list):
+        joined = "; ".join(str((e or {}).get("error") or e) for e in body)
+        return joined[:300] or response.text[:200]
     title = str(body.get("title") or "")
-    detail = str(body.get("detail") or "")
+    detail = str(body.get("detail") or body.get("error") or "")
     extra = "; ".join(str(e) for e in (body.get("errors") or []))
     joined = ": ".join(part for part in (title, detail) if part)
     if extra:
@@ -116,6 +150,7 @@ class RunPodProvider:
         *,
         api_key: str | None = None,
         base_url: str | None = None,
+        rest_url: str | None = None,
         client: httpx.AsyncClient | None = None,
         timeout: float = 30.0,
         attempts: int = 4,
@@ -123,6 +158,9 @@ class RunPodProvider:
         sleeper: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         """Args:
+        base_url: the v2 CATALOG dialect (offers/pricing).
+        rest_url: the documented v1 POD-LIFECYCLE dialect — the one that speaks
+            ``allowedCudaVersions``. See the module docstring for why the split exists.
         client: injected for MockTransport tests, exactly like the worker adapters. Left None,
             each call opens a short-lived client — fine at control-plane call rates.
         attempts / base_delay / sleeper: the transient-retry knobs. Control-plane calls get the
@@ -139,6 +177,7 @@ class RunPodProvider:
             )
         self._api_key = key
         self.base_url = (base_url or cfg.runpod_base_url).rstrip("/")
+        self.rest_url = (rest_url or cfg.runpod_rest_url).rstrip("/")
         self._client = client
         self._timeout = timeout
         self._attempts = max(1, attempts)
@@ -172,6 +211,7 @@ class RunPodProvider:
         json_body: dict | None = None,
         params: dict | None = None,
         idempotent: bool = True,
+        base: str | None = None,
     ) -> httpx.Response:
         """One API call with bounded transient retries.
 
@@ -184,7 +224,7 @@ class RunPodProvider:
         A transient *status* is different: a 429/503 response proves the server refused before
         creating anything, so those retry even on provision.
         """
-        url = f"{self.base_url}{path}"
+        url = f"{base or self.base_url}{path}"
         failure = ""
         for attempt in range(self._attempts):
             if attempt:
@@ -277,32 +317,33 @@ class RunPodProvider:
     ) -> Instance:
         payload: dict = {
             "name": label,
-            "image": image,
-            "gpu": {"id": offer.offer_id, "count": 1},
+            "imageName": image,
+            "gpuTypeIds": [offer.offer_id],
+            "gpuCount": 1,
             "env": dict(env),
-            "cloud": _cloud_tier(),
-            # NO CUDA floor on this dialect, and not for lack of trying: the DOCUMENTED RunPod
-            # API (rest.runpod.io PodCreateInput) accepts allowedCudaVersions, but this endpoint
-            # — the live-bisected api.runpod.io/v2 dialect — 422s the field by name
-            # ("additional properties 'allowedCudaVersions' not allowed", 2026-08-01). Until the
-            # backend migrates to the documented dialect, an old-driver draw here is a cheap
-            # fast failure (~$0.008, ~3 min: torch refuses, launcher terminates + settles), and
-            # retries re-roll the host. _allowed_cuda_versions() stays for the migration.
-            # SSH is how the launcher reaches the box; declaring 22/tcp is what makes a public
-            # mapping appear in runtime.ports for describe() to read back.
+            "cloudType": _cloud_tier(),
+            # The reason this backend speaks the documented dialect at all: unset means "any
+            # CUDA version is acceptable" — how a 12.4-driver relic billed a full bootstrap
+            # before torch refused it (2026-08-01). The floor is torch's, shared across
+            # backends (base.min_cuda).
+            "allowedCudaVersions": _allowed_cuda_versions(),
+            # SSH is how the launcher reaches the box; declaring 22/tcp is what makes
+            # publicIp + portMappings["22"] appear for describe() to read back.
             "ports": ["22/tcp"],
-            # Container disk is MANDATORY in practice though not in the schema: the handler
-            # treats a body without `disk` as "no pod configuration parameters" and 400s the
-            # whole request (bisected live, 2026-07-31 — same payload with disk advances).
-            # 20 GB holds the image layers plus uv caches; training artifacts live on the
-            # persistent /workspace mount, not here.
-            "disk": 20,
+            # Explicit even though this dialect would default it (to 50): every field left to a
+            # default is a field the server chooses — the empty-body probe 201'd a $0.69/hr
+            # Secure 4090 out of pure defaults. 20 GB holds image layers plus uv caches;
+            # training artifacts live on the persistent /workspace volume, not here.
+            "containerDiskInGb": 20,
         }
         if volume_gb:
             # A persistent volume at RunPod's conventional /workspace: checkpoints survive a
             # container restart, which on community cloud is a when, not an if.
-            payload["mounts"] = {"persistent": {"size": volume_gb, "path": "/workspace"}}
-        response = await self._request("POST", "/pods", json_body=payload, idempotent=False)
+            payload["volumeInGb"] = volume_gb
+            payload["volumeMountPath"] = "/workspace"
+        response = await self._request(
+            "POST", "/pods", json_body=payload, idempotent=False, base=self.rest_url
+        )
         if response.status_code >= 400:
             raise ProviderError(
                 f"{self.name}: provision of {offer.offer_id!r} refused — "
@@ -324,7 +365,7 @@ class RunPodProvider:
         — and the launcher's watch loop needs that to read as "stopped billing", not "mystery".
         """
         try:
-            response = await self._request("GET", f"/pods/{instance_id}")
+            response = await self._request("GET", f"/pods/{instance_id}", base=self.rest_url)
         except ProviderError as exc:
             return self._opaque(instance_id, InstanceState.UNKNOWN, str(exc))
         if response.status_code == 404:
@@ -332,7 +373,7 @@ class RunPodProvider:
         if response.status_code >= 400:
             return self._opaque(instance_id, InstanceState.UNKNOWN, _reason(response))
         pod = body_json(response)
-        if pod is None:
+        if not isinstance(pod, dict):
             # "Spoke, but not in JSON" is a poll answer, not a crash: UNKNOWN, poll again.
             return self._opaque(instance_id, InstanceState.UNKNOWN, "non-JSON body")
         return self._to_instance(pod)
@@ -340,13 +381,15 @@ class RunPodProvider:
     async def list_instances(self) -> Sequence[Instance]:
         """Every pod on the account, any state — the billing-leak backstop's raw material.
 
-        ``GET /pods`` → ``{"pods": [...]}`` (``ListPodsResponse``, verified July 2026 against
-        the v2 OpenAPI spec). Each pod runs through the same mapper as describe, so its ``name``
-        lands in ``raw["label"]`` for the sweep to join on. A failed list RAISES rather than
-        returning ``[]``: to an orphan sweep, "could not look" and "nothing there" are opposite
-        answers, and the wrong one ends the search while a GPU keeps billing.
+        ``GET /pods`` on the v1 dialect returns a **bare array** (live-verified 2026-08-01; the
+        v2 envelope shape is tolerated for the override case). Each pod runs through the same
+        mapper as describe, so its ``name`` lands in ``raw["label"]`` for the sweep to join on.
+        A failed list RAISES rather than returning ``[]``: to an orphan sweep, "could not look"
+        and "nothing there" are opposite answers, and the wrong one ends the search while a GPU
+        keeps billing. NOTE: list bodies carry each pod's full ``env`` — secrets — so neither
+        this response nor ``Instance.raw`` from it may ever be logged wholesale.
         """
-        response = await self._request("GET", "/pods")
+        response = await self._request("GET", "/pods", base=self.rest_url)
         if response.status_code >= 400:
             raise ProviderError(
                 f"{self.name}: listing pods failed — "
@@ -358,7 +401,8 @@ class RunPodProvider:
                 f"{self.name}: pod list returned non-JSON "
                 f"(http {response.status_code}) — could-not-look must not read as nothing-there"
             )
-        return [self._to_instance(pod) for pod in (data or {}).get("pods") or []]
+        pods = data if isinstance(data, list) else (data or {}).get("pods") or []
+        return [self._to_instance(pod) for pod in pods]
 
     async def terminate(self, instance_id: str) -> None:
         """DELETE the pod. Idempotent by construction: 404 means already gone, which is success.
@@ -367,7 +411,7 @@ class RunPodProvider:
         the second call would mask the original crash and could abort sibling cleanup while a
         GPU keeps billing.
         """
-        response = await self._request("DELETE", f"/pods/{instance_id}")
+        response = await self._request("DELETE", f"/pods/{instance_id}", base=self.rest_url)
         if response.status_code == 404 or response.status_code < 400:
             return
         raise ProviderError(
@@ -376,27 +420,29 @@ class RunPodProvider:
         )
 
     async def cost_so_far(self, instance_id: str) -> float | None:
-        """Provider-reported uptime x the pod's own rate; None when that is not knowable.
+        """Provider-clock uptime x the pod's own rate; None when that is not knowable.
 
-        The Pod object carries no accrued-dollars field (billing is a separate aggregate
-        endpoint, ``/billing/pods``), but ``runtime.uptime`` is the provider's own clock — more
-        trustworthy than the launcher's wall clock, which lies after a restart. ``runtime`` is
-        null unless the pod is RUNNING, so a stopped or vanished pod returns None and the
-        ledger falls back to its own estimate.
+        The v1 Pod carries no accrued-dollars or uptime-seconds field, but ``lastStartedAt`` is
+        the provider's own clock — more trustworthy than the launcher's wall clock, which lies
+        after a restart. A pod not desired-RUNNING, or with an unparseable timestamp, returns
+        None and the ledger falls back to its own estimate (over-count, never under-count).
         """
         try:
-            response = await self._request("GET", f"/pods/{instance_id}")
+            response = await self._request("GET", f"/pods/{instance_id}", base=self.rest_url)
         except ProviderError:
             return None
         if response.status_code >= 400:
             return None
         pod = body_json(response)
-        if pod is None:
+        if not isinstance(pod, dict):
             return None
-        uptime = ((pod or {}).get("runtime") or {}).get("uptime")
-        if uptime is None:
+        if str(pod.get("desiredStatus") or "").upper() != "RUNNING":
             return None
-        return float(uptime) / 3600.0 * float(pod.get("cost") or 0.0)
+        started = _parse_pod_timestamp(str(pod.get("lastStartedAt") or ""))
+        if started is None:
+            return None
+        hours = max(0.0, (datetime.now(UTC) - started).total_seconds() / 3600.0)
+        return hours * float(pod.get("costPerHr") or 0.0)
 
     def _opaque(self, instance_id: str, state: InstanceState, error: str) -> Instance:
         return Instance(
@@ -409,22 +455,31 @@ class RunPodProvider:
         )
 
     def _to_instance(self, pod: dict) -> Instance:
-        ssh_host: str | None = None
+        ssh_host = str(pod.get("publicIp") or "") or None
         ssh_port: int | None = None
-        for port in (pod.get("runtime") or {}).get("ports") or []:
-            if port.get("private") == 22 and port.get("type") == "tcp":
-                ssh_host = port.get("ip")
-                ssh_port = int(port["public"]) if port.get("public") else None
-                break
+        mapped = (pod.get("portMappings") or {}).get("22")
+        if mapped:
+            ssh_port = int(mapped)
+        desired = str(pod.get("desiredStatus") or pod.get("status") or "").upper()
+        state = _POD_STATES.get(desired, InstanceState.UNKNOWN)
+        if state is InstanceState.RUNNING and not (ssh_host and ssh_port):
+            # The v1 dialect's missing PENDING class, synthesized: "RUNNING" is a desire from
+            # the moment of creation; the container is actually up only once it has an address.
+            state = InstanceState.PENDING
+        gpu_ids = pod.get("gpuTypeIds") or []
+        gpu_name = str((pod.get("machine") or {}).get("gpuTypeId") or "") or str(
+            gpu_ids[0] if gpu_ids else ""
+        )
         return Instance(
             provider=self.name,
             instance_id=str(pod.get("id") or ""),
-            state=_POD_STATES.get(str(pod.get("status") or "").upper(), InstanceState.UNKNOWN),
-            gpu_name=str((pod.get("gpu") or {}).get("id") or ""),
-            price_per_hour=float(pod.get("cost") or 0.0),
+            state=state,
+            gpu_name=gpu_name,
+            price_per_hour=float(pod.get("costPerHr") or pod.get("cost") or 0.0),
             ssh_host=ssh_host,
             ssh_port=ssh_port,
             # RunPod calls it "name"; the orphan sweep joins on raw["label"] across providers,
-            # so the normalized key is guaranteed here (empty string when absent).
+            # so the normalized key is guaranteed here (empty string when absent). raw carries
+            # the pod's env — secrets — so it must never be logged wholesale.
             raw={**pod, "label": str(pod.get("name") or "")},
         )

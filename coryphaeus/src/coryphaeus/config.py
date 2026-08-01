@@ -24,10 +24,15 @@ DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 DEFAULT_FEATHERLESS_BASE_URL = "https://api.featherless.ai/v1"
 #: OpenRouter's OpenAI-compatible API root (verified July 2026). Note the path is /api/v1, not /v1.
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-#: RunPod REST v2 (verified July 2026). The older GraphQL API and the v1 REST API at
-#: rest.runpod.io both still answer, but v1's own docs carry a retirement notice — new
-#: integrations are pointed at v2. Overridable so tests and a future migration need no code edit.
+#: RunPod GPU CATALOG (offers/pricing) — the api.runpod.io/v2 dialect, verified July 2026.
 DEFAULT_RUNPOD_BASE_URL = "https://api.runpod.io/v2"
+#: RunPod POD LIFECYCLE (create/get/list/delete) — the DOCUMENTED PodCreateInput dialect at
+#: rest.runpod.io/v1, live-verified 2026-08-01. The July note that "v1 carries a retirement
+#: notice" described the OLD generation shuffle; the current docs.runpod.io api-reference
+#: serves exactly this API, and it is the only dialect that accepts allowedCudaVersions — the
+#: field that stops the marketplace selling us drivers our torch refuses. Both dialects read
+#: the same pods; the backend is deliberately hybrid (see runpod.py's header).
+DEFAULT_RUNPOD_REST_URL = "https://rest.runpod.io/v1"
 #: Vast.ai's console REST API — the same one their CLI drives (verified July 2026).
 DEFAULT_VAST_BASE_URL = "https://console.vast.ai/api/v0"
 
@@ -75,6 +80,7 @@ class Settings:
     openrouter_unit_budget: int
     runpod_api_key: str | None
     runpod_base_url: str
+    runpod_rest_url: str
     vast_api_key: str | None
     vast_base_url: str
     data_dir: Path
@@ -119,6 +125,7 @@ def settings() -> Settings:
         openrouter_unit_budget=_int_env("OPENROUTER_UNIT_BUDGET", 16),
         runpod_api_key=os.environ.get("RUNPOD_API_KEY", "").strip() or None,
         runpod_base_url=os.environ.get("RUNPOD_BASE_URL", "").strip() or DEFAULT_RUNPOD_BASE_URL,
+        runpod_rest_url=os.environ.get("RUNPOD_REST_URL", "").strip() or DEFAULT_RUNPOD_REST_URL,
         # VAST_AI_API_KEY accepted as an alias: it is what Vast's own console copy-paste suggests,
         # so first-time setups land on it naturally. VAST_API_KEY stays canonical in the docs.
         vast_api_key=(
