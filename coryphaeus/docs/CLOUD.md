@@ -227,13 +227,20 @@ re-lists), loosen `--max-price` by a few cents, drop `--min-vram` if you were ab
 policy's need, try the other provider, or wait for off-peak. This is a capacity drought, not a
 launcher bug — the same weather phase 3 observed on the worker provider.
 
-**Before blaming hosts, check whether every death happened at exactly your timeout.** Seven
-"junk hosts" in one night (2026-07-31) all died pending at precisely the then-default 1500s —
-which is not what broken hosts look like, it is what honest cold image pulls look like when
-guillotined at 96%: ~10 GB at peak-hour registry speeds needs more than 25 minutes, and the
-"good" hosts were merely warm ones. A pending box costs pennies per extra ten minutes, while a
-re-roll repeats the cold pull from zero on a different cold host. The default is now 2700s;
-raise it before concluding the market is broken.
+**Boots are bimodal — so the window's job is failing fast, not patience.** Measured over 30
+rentals (2026-08-01): **16 hosts reached `ssh_ready` in 40–90 seconds; 14 never came up at
+all.** Nothing lands in between. A host that is silent at five minutes is not slow, it is
+dead, and waiting on it buys nothing but wall clock — which is the scarce resource whenever a
+run has to finish by a deadline. The default window is 900s: an order of magnitude above every
+observed success, tight enough to re-roll ~4 times an hour.
+
+*(An earlier default raised this to 2700s on the theory that ~10 GB cold image pulls were being
+guillotined at 1500s — seven same-night failures had all died at exactly that mark. The 2700s
+window then produced the same failures 45 minutes later instead of 25, which disproved it: the
+deaths clustered at the timeout because that is when we stopped waiting, not because the pull
+was nearly done. Worth remembering as a shape of mistake — "every failure happened at exactly
+my threshold" reads as a guillotine, but it is equally the signature of a population that
+never finishes.)*
 
 **"NVIDIA driver too old" on the very first training step.** The image's CUDA toolkit is not
 the constraint — the *host driver* is, and marketplace hosts run whatever driver they run. A
