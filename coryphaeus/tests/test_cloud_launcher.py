@@ -95,6 +95,33 @@ class StubProvider:
         return self._cost
 
 
+class CapacityFussyProvider(StubProvider):
+    """A StubProvider whose provision refuses the first N offers the way a dry market does —
+    or, when ``schema_error`` is set, the way a broken payload does (identically, every time)."""
+
+    def __init__(self, log, *, offers, refuse_first=1, schema_error=False, **kwargs):
+        super().__init__(log, offers=offers, **kwargs)
+        self._refusals_left = refuse_first
+        self._schema_error = schema_error
+
+    async def provision(self, offer, *, image, env, volume_gb, label):
+        if self._schema_error:
+            self.log.append("provision-schema-refused")
+            raise ProviderError(
+                "stub: provision refused — http 422: additional properties 'x' not allowed"
+            )
+        if self._refusals_left > 0:
+            self._refusals_left -= 1
+            self.log.append("provision-capacity-refused")
+            raise ProviderError(
+                "stub: provision refused — http 500: create pod: "
+                "There are no instances currently available"
+            )
+        return await super().provision(
+            offer, image=image, env=env, volume_gb=volume_gb, label=label
+        )
+
+
 class RecordingLedger(BudgetLedger):
     """A real ledger that also stamps reserve/settle into the shared timeline."""
 
@@ -254,6 +281,67 @@ async def test_remote_failure_still_terminates_and_settles(tmp_path):
     # checkpoints sitting there are what --resume resumes from.
     assert "pull" in log
     assert len(settle_rows(ledger)) == 1
+
+
+PRICIER_OFFER = GpuOffer(
+    provider="stub",
+    offer_id="o-2",
+    gpu_name="RTX 3090 Ti",
+    vram_gb=24,
+    price_per_hour=0.55,
+    raw={"host_id": 155125, "machine_id": 43503},
+)
+
+
+async def test_capacity_refusal_falls_through_to_the_next_offer(tmp_path):
+    """RunPod live, 2026-08-01: with the driver floor constraining hosts, the cheapest GPU
+    class was dry ('no instances currently available') while pricier qualifying classes sat in
+    the same offers() result — and the launch failed instead of trying them. Now it tries them.
+    The reservation is priced at the CAP, not the offer, so it stays the honest worst case
+    across any fallback — asserted, not assumed."""
+    log: list[str] = []
+    ledger = ledger_for(tmp_path, log)
+    provider = CapacityFussyProvider(log, offers=(OFFER, PRICIER_OFFER), refuse_first=1)
+    spec = spec_for(tmp_path)
+    result = await run_launch(tmp_path, log, provider, spec, ledger)
+
+    assert result.exit_code == 0
+    assert result.offer.offer_id == "o-2"  # the pricier survivor
+    phases = [e["phase"] for e in read_events(tmp_path)]
+    assert phases.count("offer_selected") == 2
+    assert phases.count("offer_fallback") == 1
+    fallback = next(e for e in read_events(tmp_path) if e["phase"] == "offer_fallback")
+    assert fallback["detail"]["skipped_offer_id"] == "o-1"
+    assert "no instances currently available" in fallback["detail"]["reason"]
+    # One reservation, priced at the cap — identical to a no-fallback run.
+    reserves = [r for r in ledger.rows() if r["event"] == "reserve"]
+    assert len(reserves) == 1
+    assert reserves[0]["estimated_usd"] == pytest.approx(
+        round(worst_case_usd(spec.max_price_per_hour, spec.max_hours, spec.volume_gb), 4)
+    )
+
+
+async def test_schema_refusal_does_not_fall_through(tmp_path):
+    """A broken payload refuses identically on every offer; falling through would turn one
+    clear error into three muddled ones. It must surface immediately — and still settle."""
+    log: list[str] = []
+    ledger = ledger_for(tmp_path, log)
+    provider = CapacityFussyProvider(log, offers=(OFFER, PRICIER_OFFER), schema_error=True)
+    with pytest.raises(ProviderError, match="additional properties"):
+        await run_launch(tmp_path, log, provider, spec_for(tmp_path), ledger)
+    assert log.count("provision-schema-refused") == 1  # one try, no shopping spree
+    assert "offer_fallback" not in [e["phase"] for e in read_events(tmp_path)]
+    assert ledger.month_spend().reserved_usd == 0.0  # settled on the way out
+
+
+async def test_all_offers_capacity_refused_is_a_named_launcher_error(tmp_path):
+    log: list[str] = []
+    ledger = ledger_for(tmp_path, log)
+    provider = CapacityFussyProvider(log, offers=(OFFER, PRICIER_OFFER), refuse_first=99)
+    with pytest.raises(LauncherError, match="refused for capacity"):
+        await run_launch(tmp_path, log, provider, spec_for(tmp_path), ledger)
+    assert log.count("provision-capacity-refused") == 2  # both offers tried, bound respected
+    assert ledger.month_spend().reserved_usd == 0.0
 
 
 async def test_provision_timeout_terminates_without_ever_running_the_payload(tmp_path):

@@ -31,7 +31,7 @@ from pathlib import Path, PurePosixPath
 
 from . import remote as remote_mod
 from .budget import BudgetLedger
-from .providers.base import CloudProvider, GpuOffer, Instance, InstanceState
+from .providers.base import CloudProvider, GpuOffer, Instance, InstanceState, ProviderError
 
 #: Storage estimate used in the worst-case reservation and the wall-clock cost fallback.
 #: ≈ $0.10/GB-month — the ballpark both target providers publish — prorated to the hour.
@@ -132,23 +132,51 @@ class EventLog:
             os.fsync(fh.fileno())
 
 
-def pick_offer(
+def rank_offers(
     offers: Sequence[GpuOffer], *, min_vram_gb: int, max_price_per_hour: float
-) -> GpuOffer:
-    """Cheapest offer meeting the floor specs.
+) -> list[GpuOffer]:
+    """Every qualifying offer, cheapest first — the capacity fallback's menu.
 
     Re-sorts instead of trusting the provider's "cheapest first" promise — a backend ordering bug
-    should cost nothing worse than a redundant ``min()``. Ties break to the earliest listed.
+    should cost nothing worse than a redundant sort. Ties keep listing order (sort is stable).
     """
-    qualifying = [
-        o for o in offers if o.vram_gb >= min_vram_gb and o.price_per_hour <= max_price_per_hour
-    ]
+    qualifying = sorted(
+        (o for o in offers if o.vram_gb >= min_vram_gb and o.price_per_hour <= max_price_per_hour),
+        key=lambda o: o.price_per_hour,
+    )
     if not qualifying:
         raise NoOfferError(
             f"no offer with >= {min_vram_gb} GB VRAM at <= ${max_price_per_hour:.2f}/hr "
             f"({len(offers)} offers seen). Raise --max-price or lower --min-vram deliberately."
         )
-    return min(qualifying, key=lambda o: o.price_per_hour)
+    return qualifying
+
+
+def pick_offer(
+    offers: Sequence[GpuOffer], *, min_vram_gb: int, max_price_per_hour: float
+) -> GpuOffer:
+    """Cheapest offer meeting the floor specs (the head of :func:`rank_offers`)."""
+    return rank_offers(offers, min_vram_gb=min_vram_gb, max_price_per_hour=max_price_per_hour)[0]
+
+
+#: How many qualifying offers one launch may try before conceding the market has no capacity.
+#: Three covers "the cheapest class is dry" without turning a systemic outage into a shopping
+#: spree of doomed rentals.
+MAX_OFFER_ATTEMPTS = 3
+
+#: Provider phrasings that mean "the market has none of THESE right now" — the only refusal
+#: class where trying the next offer is correct. Conservative on purpose: schema and auth errors
+#: repeat identically on every offer, and falling through on them would turn one clear error
+#: into three muddled ones. Source: RunPod's create-pod 500 (live, 2026-08-01).
+_CAPACITY_REFUSAL_MARKS = (
+    "no instances currently available",
+    "no instances available",
+)
+
+
+def _is_capacity_refusal(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(mark in text for mark in _CAPACITY_REFUSAL_MARKS)
 
 
 def worst_case_usd(price_per_hour: float, max_hours: float, volume_gb: int) -> float:
@@ -395,28 +423,58 @@ async def launch(
     settled: dict[str, float] = {}
 
     try:
-        offer = pick_offer(
+        # The whole qualifying menu, not just the head: with driver floors constraining hosts,
+        # the cheapest GPU class can be genuinely dry ("no instances currently available",
+        # RunPod live 2026-08-01) while pricier qualifying classes sit right behind it. Every
+        # candidate is at or below max_price_per_hour, so the reservation above — priced at the
+        # CAP, not the offer — stays the honest worst case across any fallback.
+        candidates = rank_offers(
             await provider.offers(
                 min_vram_gb=spec.min_vram_gb, max_price_per_hour=spec.max_price_per_hour
             ),
             min_vram_gb=spec.min_vram_gb,
             max_price_per_hour=spec.max_price_per_hour,
         )
-        events.emit(
-            "offer_selected",
-            offer_id=offer.offer_id,
-            gpu=offer.gpu_name,
-            vram_gb=offer.vram_gb,
-            price_per_hour=offer.price_per_hour,
-        )
-
-        instance = await provider.provision(
-            offer,
-            image=spec.image,
-            env=spec.env,
-            volume_gb=spec.volume_gb,
-            label=spec.label,
-        )
+        capacity_refusals: list[ProviderError] = []
+        for rank, candidate in enumerate(candidates[:MAX_OFFER_ATTEMPTS], start=1):
+            events.emit(
+                "offer_selected",
+                offer_id=candidate.offer_id,
+                gpu=candidate.gpu_name,
+                vram_gb=candidate.vram_gb,
+                price_per_hour=candidate.price_per_hour,
+                rank=rank,
+            )
+            try:
+                instance = await provider.provision(
+                    candidate,
+                    image=spec.image,
+                    env=spec.env,
+                    volume_gb=spec.volume_gb,
+                    label=spec.label,
+                )
+            except ProviderError as exc:
+                if not _is_capacity_refusal(exc):
+                    raise
+                capacity_refusals.append(exc)
+                events.emit(
+                    "offer_fallback",
+                    skipped_offer_id=candidate.offer_id,
+                    gpu=candidate.gpu_name,
+                    price_per_hour=candidate.price_per_hour,
+                    reason=str(exc)[:200],
+                )
+                continue
+            offer = candidate
+            break
+        if instance is None or offer is None:
+            tried = ", ".join(
+                f"{c.gpu_name} ${c.price_per_hour:.2f}/hr" for c in candidates[:MAX_OFFER_ATTEMPTS]
+            )
+            raise LauncherError(
+                f"all {len(capacity_refusals)} tried offer(s) refused for capacity ({tried}) — "
+                f"last: {capacity_refusals[-1]}"
+            )
         provisioned_at = time.monotonic()
         # Host identity rides the event because instance ids change per rental: 2026-07-31's
         # five same-night provision failures were unattributable from instance_id alone, and
