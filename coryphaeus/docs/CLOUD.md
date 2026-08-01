@@ -236,8 +236,10 @@ host below the pinned torch's CUDA build passes every other floor, bills a full 
 then refuses in the first step — **both providers sold us one the same night** (a 12.8 Vast
 host, then a 12.4 RunPod host). The floor is torch's, shared across backends
 (`CORYPHAEUS_MIN_CUDA`, default 12.9; the older `CORYPHAEUS_VAST_MIN_CUDA` spelling is honored
-as an alias): Vast filters offers on `cuda_max_good`, RunPod sends `allowedCudaVersions` on
-create (unset means "any CUDA version is acceptable" — the docs' words, and the trap). If this
+as an alias): Vast filters offers on `cuda_max_good`, and RunPod sends `allowedCudaVersions` on
+create — which is the entire reason the RunPod backend's pod lifecycle speaks the documented
+`rest.runpod.io/v1` dialect (the older `api.runpod.io/v2` pods endpoint 422s the field by
+name; unset means "any CUDA version is acceptable" — the docs' words, and the trap). If this
 error still appears, the floor has drifted behind the torch pin — raise it in lockstep, not on
 a hunch.
 

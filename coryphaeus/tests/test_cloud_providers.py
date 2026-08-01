@@ -15,6 +15,7 @@ production — including Vast's single-instance-under-a-plural-key quirk and its
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -143,18 +144,39 @@ def _runpod_pod(
     runtime: dict | None = None,
     pod_id: str = "k2h8xpod1",
     name: str = "coryphaeus-r6",
+    last_started: str | None = None,
 ) -> dict:
+    """One pod as the documented v1 dialect reports it (live-verified 2026-08-01).
+
+    Keeps the suite's old vocabulary: ``status`` feeds ``desiredStatus`` ("PROVISIONING" maps
+    to desire-RUNNING with no address — the dialect has no pending class; the backend
+    synthesizes it), and ``runtime={"ports": [...]}`` translates into publicIp + portMappings.
+    The fixture carries an ``env`` secret on purpose: any test that ever asserts on a logged
+    raw body should trip over it.
+    """
+    desired = status.upper()
+    if desired in ("PROVISIONING", "STARTING"):
+        desired = "RUNNING"
+    public_ip: str | None = None
+    mappings: dict[str, int] = {}
+    for port in (runtime or {}).get("ports") or []:
+        if port.get("private") == 22 and port.get("type") == "tcp":
+            public_ip = port.get("ip")
+            if port.get("public"):
+                mappings["22"] = int(port["public"])
     return {
         "id": pod_id,
         "name": name,
-        "status": status,
-        "gpu": {"id": "NVIDIA GeForce RTX 4090", "count": 1},
-        "disk": 40,
-        "cost": 0.34,
-        "createdAt": "2026-07-30T12:00:00Z",
-        "startedAt": "2026-07-30T12:01:12Z" if runtime else None,
-        "runtime": runtime,
-        "dataCenterId": None,
+        "desiredStatus": desired,
+        "publicIp": public_ip,
+        "portMappings": mappings,
+        "gpuTypeIds": ["NVIDIA GeForce RTX 4090"],
+        "gpuCount": 1,
+        "containerDiskInGb": 40,
+        "costPerHr": 0.34,
+        "machineId": "m-77aa01",
+        "lastStartedAt": last_started,
+        "env": {"FEATHERLESS_API_KEY": "secret-that-must-never-reach-a-log"},
     }
 
 
@@ -404,7 +426,7 @@ async def test_runpod_secure_tier_drives_query_price_and_payload_together(monkey
         ("A100 80GB PCIe", 1.64),
         ("H100 PCIe", 2.39),  # secure-only card: invisible on COMMUNITY, rentable here
     ]
-    assert seen["body"]["cloud"] == "SECURE"
+    assert seen["body"]["cloudType"] == "SECURE"
 
 
 async def test_runpod_provision_sends_the_documented_body_with_env_injected():
@@ -422,28 +444,30 @@ async def test_runpod_provision_sends_the_documented_body_with_env_injected():
         )
 
     body = seen["body"]
-    assert seen["path"] == "/v2/pods"
+    # The documented v1 dialect (rest.runpod.io) — the only one that speaks the CUDA floor.
+    assert seen["path"] == "/v1/pods"
     assert body["env"] == ENV  # the whole point: the box must boot knowing its run config
-    assert body["image"] == IMAGE
+    assert body["imageName"] == IMAGE
     assert body["name"] == "coryphaeus-r6"
-    assert body["gpu"] == {"id": "NVIDIA GeForce RTX 4090", "count": 1}
-    assert body["cloud"] == "COMMUNITY"
-    assert body["mounts"] == {"persistent": {"size": 40, "path": "/workspace"}}
+    assert body["gpuTypeIds"] == ["NVIDIA GeForce RTX 4090"]
+    assert body["gpuCount"] == 1
+    assert body["cloudType"] == "COMMUNITY"
+    assert body["volumeInGb"] == 40
+    assert body["volumeMountPath"] == "/workspace"
     assert "22/tcp" in body["ports"]
-    # The v2 dialect 422s allowedCudaVersions by name (live, 2026-08-01) even though the
-    # DOCUMENTED PodCreateInput accepts it — so it must NOT ride this request until the backend
-    # migrates dialects. An old-driver draw is a cheap fast failure; a 422 is no rental at all.
-    assert "allowedCudaVersions" not in body
-    # `disk` is mandatory in practice though optional in the schema: a body without it 400s as
-    # "no pod configuration parameters" (bisected live 2026-07-31). This pin keeps it mandatory
-    # in our payload forever.
-    assert body["disk"] >= 10
+    # The reason for the migration: unset means "any CUDA version is acceptable" (a 12.4 relic
+    # billed a full bootstrap before torch refused, 2026-08-01). The floor always rides.
+    assert body["allowedCudaVersions"] == ["12.9", "13.0"]
+    # Explicit even though this dialect defaults it (to 50): every field left to a default is a
+    # field the server chooses — the empty-body probe 201'd a $0.69/hr pod from pure defaults.
+    assert body["containerDiskInGb"] >= 10
     assert instance.instance_id == "k2h8xpod1"
+    # desire-RUNNING with no address yet: the synthesized pending class.
     assert instance.state is InstanceState.PENDING
     assert instance.price_per_hour == 0.34
 
 
-async def test_runpod_describe_reads_ssh_out_of_runtime_ports():
+async def test_runpod_describe_reads_ssh_from_public_ip_and_port_mappings():
     provider, client = _runpod(
         lambda r: httpx.Response(200, json=_runpod_pod("RUNNING", runtime=RUNPOD_RUNTIME))
     )
@@ -454,6 +478,17 @@ async def test_runpod_describe_reads_ssh_out_of_runtime_ports():
     assert instance.ssh_host == "203.0.113.7"
     assert instance.ssh_port == 30022
     assert instance.gpu_name == "NVIDIA GeForce RTX 4090"
+
+
+async def test_runpod_desire_running_without_an_address_is_pending():
+    """The v1 dialect has no PROVISIONING class — a pod is 'RUNNING' by desire from the moment
+    of creation. The backend must synthesize PENDING from the missing address, or the launcher
+    would knock on a container that does not exist yet."""
+    provider, client = _runpod(lambda r: httpx.Response(200, json=_runpod_pod("RUNNING")))
+    async with client:
+        instance = await provider.describe("k2h8xpod1")
+    assert instance.state is InstanceState.PENDING
+    assert instance.ssh_host is None
 
 
 async def test_runpod_describe_404_is_terminated_not_an_error():
@@ -493,7 +528,7 @@ async def test_runpod_terminate_is_idempotent_including_the_404_second_call():
     async with client:
         await provider.terminate("k2h8xpod1")
         await provider.terminate("k2h8xpod1")  # no raise — that is the assertion
-    assert calls == ["DELETE /v2/pods/k2h8xpod1", "DELETE /v2/pods/k2h8xpod1"]
+    assert calls == ["DELETE /v1/pods/k2h8xpod1", "DELETE /v1/pods/k2h8xpod1"]
 
 
 async def test_runpod_transient_status_is_retried_and_can_succeed():
@@ -565,19 +600,25 @@ async def test_runpod_provision_timeout_is_not_blindly_retried():
     assert calls["n"] == 1
 
 
-async def test_runpod_cost_so_far_uses_provider_uptime_not_wall_clock():
+async def test_runpod_cost_so_far_uses_the_provider_clock_not_wall_clock():
+    """lastStartedAt is the provider's own clock; the launcher's wall clock lies after a
+    restart. The Go-style stamp ('… +0000 UTC', variable-width fraction) must parse."""
+    started = datetime.now(UTC) - timedelta(hours=1.5)
+    stamp = started.strftime("%Y-%m-%d %H:%M:%S.%f")[:-4] + " +0000 UTC"
     provider, client = _runpod(
-        lambda r: httpx.Response(200, json=_runpod_pod("RUNNING", runtime=RUNPOD_RUNTIME))
+        lambda r: httpx.Response(
+            200, json=_runpod_pod("RUNNING", runtime=RUNPOD_RUNTIME, last_started=stamp)
+        )
     )
     async with client:
         cost = await provider.cost_so_far("k2h8xpod1")
-    assert cost == pytest.approx(5400 / 3600 * 0.34)  # 1.5 h at $0.34/hr
+    assert cost == pytest.approx(1.5 * 0.34, rel=0.02)  # ~1.5 h at $0.34/hr
 
 
 async def test_runpod_cost_so_far_is_none_before_the_pod_runs():
-    """runtime is null until RUNNING; None hands the ledger its own fallback, a made-up zero
-    would be mistaken for a report."""
-    provider, client = _runpod(lambda r: httpx.Response(200, json=_runpod_pod("PROVISIONING")))
+    """No lastStartedAt (or not desired-RUNNING) → None: that hands the ledger its own
+    fallback, where a made-up zero would be mistaken for a report."""
+    provider, client = _runpod(lambda r: httpx.Response(200, json=_runpod_pod("EXITED")))
     async with client:
         assert await provider.cost_so_far("k2h8xpod1") is None
 
@@ -618,13 +659,14 @@ async def test_runpod_list_instances_maps_every_pod_and_surfaces_labels():
             _runpod_pod("RUNNING", runtime=RUNPOD_RUNTIME),
             _runpod_pod("EXITED", pod_id="z9forgot0", name="coryphaeus-r4-orphan"),
         ]
-        return httpx.Response(200, json={"pods": pods})
+        # The v1 dialect returns a BARE ARRAY, not an envelope (live-verified 2026-08-01).
+        return httpx.Response(200, json=pods)
 
     provider, client = _runpod(handler)
     async with client:
         instances = await provider.list_instances()
 
-    assert seen["call"] == "GET /v2/pods"
+    assert seen["call"] == "GET /v1/pods"
     assert [(i.instance_id, i.state) for i in instances] == [
         ("k2h8xpod1", InstanceState.RUNNING),
         ("z9forgot0", InstanceState.STOPPED),
@@ -634,9 +676,19 @@ async def test_runpod_list_instances_maps_every_pod_and_surfaces_labels():
 
 
 async def test_runpod_list_instances_empty_account_is_an_empty_list():
-    provider, client = _runpod(lambda r: httpx.Response(200, json={"pods": []}))
+    provider, client = _runpod(lambda r: httpx.Response(200, json=[]))
     async with client:
         assert list(await provider.list_instances()) == []
+
+
+async def test_runpod_list_tolerates_the_enveloped_shape_too():
+    """The v2 dialect wraps the same pods in {"pods": [...]}; a base-URL override pointed there
+    must not silently read as an empty account."""
+    provider, client = _runpod(
+        lambda r: httpx.Response(200, json={"pods": [_runpod_pod("RUNNING")]})
+    )
+    async with client:
+        assert len(await provider.list_instances()) == 1
 
 
 async def test_runpod_list_transient_429_is_retried_like_every_other_call():
@@ -647,7 +699,7 @@ async def test_runpod_list_transient_429_is_retried_like_every_other_call():
         if calls["n"] == 1:
             body = {"title": "Too Many Requests", "status": 429, "detail": "rate limited"}
             return httpx.Response(429, json=body)
-        return httpx.Response(200, json={"pods": [_runpod_pod("RUNNING")]})
+        return httpx.Response(200, json=[_runpod_pod("RUNNING")])
 
     provider, client = _runpod(handler)
     async with client:
