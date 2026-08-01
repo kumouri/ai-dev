@@ -42,7 +42,7 @@ import httpx
 
 from ...config import settings
 from ...workers.base import TRANSIENT_STATUSES
-from .base import GpuOffer, Instance, InstanceState, ProviderError, body_json
+from .base import GpuOffer, Instance, InstanceState, ProviderError, body_json, min_cuda
 
 
 class MissingApiKey(RuntimeError):
@@ -57,21 +57,12 @@ MIN_INET_DOWN_MBPS = 200.0
 #: the hosts that flap mid-run; an interrupted run pays for re-provisioning AND re-warming the
 #: trainer, so "slightly cheaper but occasionally vanishes" is a bad trade here.
 MIN_RELIABILITY = 0.98
-#: Minimum CUDA version the host's driver must support (Vast's ``cuda_max_good``). Bootstrap
-#: installs the repo's pinned torch, whose CUDA build refuses older drivers — observed live
-#: 2026-07-31: a healthy-scoring host carried a 12.8 driver, and the very first training step
-#: died with "NVIDIA driver too old" AFTER a fully-billed ~50-minute bootstrap. A host that
-#: does not report the field is refused too: an unknown driver is the same gamble at the same
-#: price. Raise in lockstep with torch's CUDA build; override via ``CORYPHAEUS_VAST_MIN_CUDA``.
-DEFAULT_MIN_CUDA = 12.9
-
-
-def _min_cuda() -> float:
-    raw = os.environ.get("CORYPHAEUS_VAST_MIN_CUDA", "").strip()
-    try:
-        return float(raw) if raw else DEFAULT_MIN_CUDA
-    except ValueError:
-        return DEFAULT_MIN_CUDA
+#: Vast enforces the shared driver floor (see ``base.min_cuda``) by filtering offers on the
+#: marketplace's ``cuda_max_good`` field — observed live 2026-07-31: a healthy-scoring host
+#: carried a 12.8 driver and the very first training step died with "NVIDIA driver too old"
+#: AFTER a fully-billed ~50-minute bootstrap. A host that does not report the field is refused
+#: too: an unknown driver is the same gamble at the same price.
+_min_cuda = min_cuda
 
 
 #: ``actual_status`` → normalized state. The docs' own guidance (July 2026): once

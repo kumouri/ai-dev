@@ -399,6 +399,9 @@ async def test_runpod_provision_sends_the_documented_body_with_env_injected():
     assert body["cloud"] == "COMMUNITY"
     assert body["mounts"] == {"persistent": {"size": 40, "path": "/workspace"}}
     assert "22/tcp" in body["ports"]
+    # Unset means "any CUDA version" (docs, verbatim) — how the first post-402 validate drew a
+    # 12.4-driver relic. The shared torch floor must always ride the request.
+    assert body["allowedCudaVersions"] == ["12.9", "13.0"]
     # `disk` is mandatory in practice though optional in the schema: a body without it 400s as
     # "no pod configuration parameters" (bisected live 2026-07-31). This pin keeps it mandatory
     # in our payload forever.
@@ -730,6 +733,22 @@ async def test_vast_min_cuda_env_override_admits_older_drivers(monkeypatch):
     async with client:
         offers = await provider.offers(min_vram_gb=24, max_price_per_hour=0.40)
     assert [o.offer_id for o in offers][0] == "18069000"
+
+
+def test_min_cuda_is_shared_and_honors_both_env_spellings(monkeypatch):
+    """Torch's floor, not a provider's: one value drives Vast's offer filter AND RunPod's
+    allowedCudaVersions. The vast-named var shipped first (PR #29) and stays honored."""
+    from coryphaeus.cloud.providers.base import min_cuda
+    from coryphaeus.cloud.providers.runpod import _allowed_cuda_versions
+
+    monkeypatch.delenv("CORYPHAEUS_MIN_CUDA", raising=False)
+    monkeypatch.setenv("CORYPHAEUS_VAST_MIN_CUDA", "12.7")
+    assert min_cuda() == 12.7
+    assert _allowed_cuda_versions() == ["12.7", "12.8", "12.9", "13.0"]
+
+    monkeypatch.setenv("CORYPHAEUS_MIN_CUDA", "13.0")  # the neutral name wins over the alias
+    assert min_cuda() == 13.0
+    assert _allowed_cuda_versions() == ["13.0"]
 
 
 async def test_vast_provision_injects_env_and_returns_the_new_contract_id():

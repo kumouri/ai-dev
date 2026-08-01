@@ -35,7 +35,22 @@ import httpx
 
 from ...config import settings
 from ...workers.base import TRANSIENT_STATUSES
-from .base import GpuOffer, Instance, InstanceState, ProviderError, body_json
+from .base import GpuOffer, Instance, InstanceState, ProviderError, body_json, min_cuda
+
+#: The CUDA versions RunPod's create schema accepts (docs, August 2026). The shared driver
+#: floor selects the acceptable suffix of this list.
+_CUDA_VERSIONS = (
+    "11.8", "12.0", "12.1", "12.2", "12.3", "12.4",
+    "12.5", "12.6", "12.7", "12.8", "12.9", "13.0",
+)  # fmt: skip
+
+
+def _allowed_cuda_versions() -> list[str]:
+    floor = min_cuda()
+    allowed = [v for v in _CUDA_VERSIONS if float(v) >= floor]
+    # A floor above the schema's ceiling would otherwise send [] — which the docs define as
+    # "anything goes", the exact opposite of what a high floor means. Ask for the newest.
+    return allowed or [_CUDA_VERSIONS[-1]]
 
 
 class MissingApiKey(RuntimeError):
@@ -243,6 +258,10 @@ class RunPodProvider:
             "gpu": {"id": offer.offer_id, "count": 1},
             "env": dict(env),
             "cloud": "COMMUNITY",
+            # Unset means "any CUDA version is acceptable" (docs, verbatim) — which is how the
+            # first post-402 validate drew a 12.4-driver relic that torch refused after a fully
+            # billed bootstrap. The floor is torch's, shared across backends (base.min_cuda).
+            "allowedCudaVersions": _allowed_cuda_versions(),
             # SSH is how the launcher reaches the box; declaring 22/tcp is what makes a public
             # mapping appear in runtime.ports for describe() to read back.
             "ports": ["22/tcp"],
