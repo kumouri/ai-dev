@@ -204,6 +204,7 @@ VAST_OFFERS = {
             "rentable": True,
             "geolocation": "Sweden, SE",
             "cuda_max_good": 13.0,
+            "compute_cap": 890,
         },
         {  # good but pricier — must sort after the one above
             "id": 18077391,
@@ -223,6 +224,7 @@ VAST_OFFERS = {
             "rentable": True,
             "geolocation": "Quebec, CA",
             "cuda_max_good": 13.0,
+            "compute_cap": 890,
         },
         {  # cheapest of all, but residential DSL — the network floor exists for this host
             "id": 18070001,
@@ -242,6 +244,7 @@ VAST_OFFERS = {
             "rentable": True,
             "geolocation": "Ohio, US",
             "cuda_max_good": 12.4,
+            "compute_cap": 890,
         },
         {  # flappy host — fails the reliability floor
             "id": 18070002,
@@ -261,6 +264,7 @@ VAST_OFFERS = {
             "rentable": True,
             "geolocation": "Sofia, BG",
             "cuda_max_good": 12.2,
+            "compute_cap": 890,
         },
         {  # too small for the ask below
             "id": 18070003,
@@ -280,6 +284,7 @@ VAST_OFFERS = {
             "rentable": True,
             "geolocation": "Warsaw, PL",
             "cuda_max_good": 12.4,
+            "compute_cap": 860,
         },
         {  # over the price ceiling used below
             "id": 18070004,
@@ -299,6 +304,7 @@ VAST_OFFERS = {
             "rentable": True,
             "geolocation": "Oregon, US",
             "cuda_max_good": 13.0,
+            "compute_cap": 1200,
         },
         {  # cheapest AND healthy on every floor the night of 2026-07-30 knew about — but the
             # driver only speaks CUDA 12.8, so torch refuses it after a fully-billed bootstrap.
@@ -320,6 +326,31 @@ VAST_OFFERS = {
             "rentable": True,
             "geolocation": "Lyon, FR",
             "cuda_max_good": 12.8,
+            "compute_cap": 860,
+        },
+        {  # cheapest of ALL and healthy on every floor above — but it's a Pascal (sm_61)
+            # behind a freshly-updated driver: cuda_max_good 13.0 sails through the driver
+            # floor, then torch's wheel has no kernel image for the silicon and the payload
+            # dies at its first kernel launch. The compute-cap floor exists for this host
+            # (observed live 2026-08-20, $0.016 to learn).
+            "id": 18068000,
+            "gpu_name": "Tesla P40",
+            "num_gpus": 1,
+            "gpu_ram": 24576,
+            "dph_total": 0.11,
+            "dph_base": 0.09,
+            "min_bid": 0.05,
+            "inet_down": 720.0,
+            "inet_up": 540.0,
+            "inet_down_cost": 0.0,
+            "inet_up_cost": 0.001,
+            "storage_cost": 0.07,
+            "reliability2": 0.9958,
+            "verification": "verified",
+            "rentable": True,
+            "geolocation": "Piscataway, US",
+            "cuda_max_good": 13.0,
+            "compute_cap": 610,
         },
     ]
 }
@@ -720,8 +751,8 @@ async def test_vast_offers_enforce_the_network_floors_client_side():
         offers = await provider.offers(min_vram_gb=24, max_price_per_hour=0.40)
 
     # Survivors sorted cheapest-first. The 0.19 DSL host (87 Mb/s), the 0.22 flapper (0.912
-    # reliability), the 8 GB card, the 0.55 over-ceiling card, and the 0.15 stale-driver host
-    # (cuda_max_good 12.8) are all refused.
+    # reliability), the 8 GB card, the 0.55 over-ceiling card, the 0.15 stale-driver host
+    # (cuda_max_good 12.8), and the 0.11 Pascal (compute_cap 610) are all refused.
     assert [o.offer_id for o in offers] == ["18077244", "18077391"]
     best = offers[0]
     assert best.vram_gb == 24  # 24564 MB rounds to the card class, not down to 23
@@ -752,6 +783,7 @@ async def test_vast_offers_send_the_documented_server_side_filters():
     # MB, with half a GB of tolerance for hosts reporting usable (not nameplate) VRAM.
     assert query["gpu_ram"] == {"gte": 24 * 1024 - 512}
     assert query["cuda_max_good"] == {"gte": 12.9}
+    assert query["compute_cap"] == {"gte": 750}
     assert query["dph_total"] == {"lte": 0.40}
     assert query["inet_down"] == {"gte": 200.0}
     assert query["reliability2"] == {"gte": 0.98}
@@ -772,6 +804,7 @@ async def test_vast_offers_drop_hosts_named_in_the_exclude_env(monkeypatch):
             "inet_down": 900.0,
             "reliability2": 0.995,
             "cuda_max_good": 13.0,
+            "compute_cap": 860,
             "host_id": host_id,
             "machine_id": machine_id,
         }
@@ -816,7 +849,31 @@ async def test_vast_min_cuda_env_override_admits_older_drivers(monkeypatch):
     provider, client = _vast(lambda r: httpx.Response(200, json=VAST_OFFERS))
     async with client:
         offers = await provider.offers(min_vram_gb=24, max_price_per_hour=0.40)
+    # The 0.11 Pascal is cheaper still, but the arch floor refuses it independently of the
+    # driver floor — lowering one floor must not quietly open the other.
     assert [o.offer_id for o in offers][0] == "18069000"
+
+
+async def test_vast_offers_refuse_pascal_hosts_client_side():
+    """The 2026-08-20 lesson at $0.016: a Tesla P40 behind a 13.0 driver was the cheapest offer
+    on the market and passed every floor this backend had — network, reliability, driver — then
+    died at torch's first kernel launch (no sm_61 image in a wheel that ships sm_75..sm_120).
+    The 18068000 row is that host. The driver floor measures software; this floor measures
+    silicon, and only the pair covers torch's actual contract."""
+    provider, client = _vast(lambda r: httpx.Response(200, json=VAST_OFFERS))
+    async with client:
+        offers = await provider.offers(min_vram_gb=24, max_price_per_hour=0.40)
+    assert "18068000" not in [o.offer_id for o in offers]
+
+
+async def test_vast_min_compute_cap_env_override_admits_older_arches(monkeypatch):
+    """Like the driver floor, this tracks torch's build, not a law of nature — a torch pinned
+    with Pascal kernels can lower the floor and the P40 becomes the cheapest survivor."""
+    monkeypatch.setenv("CORYPHAEUS_MIN_COMPUTE_CAP", "600")
+    provider, client = _vast(lambda r: httpx.Response(200, json=VAST_OFFERS))
+    async with client:
+        offers = await provider.offers(min_vram_gb=24, max_price_per_hour=0.40)
+    assert [o.offer_id for o in offers][0] == "18068000"
 
 
 def test_min_cuda_is_shared_and_honors_both_env_spellings(monkeypatch):
@@ -1027,6 +1084,9 @@ async def test_vast_cost_so_far_is_wall_clock_free_given_an_injected_now():
 
 def test_vast_missing_key_fails_at_construction_not_mid_run(monkeypatch):
     monkeypatch.setenv("VAST_API_KEY", "")
+    # The console-spelling alias must be blanked too, or a developer machine that exported it
+    # (exactly what the alias exists to invite) quietly supplies the key and this test flips.
+    monkeypatch.setenv("VAST_AI_API_KEY", "")
     from coryphaeus import config
 
     config.settings.cache_clear()
