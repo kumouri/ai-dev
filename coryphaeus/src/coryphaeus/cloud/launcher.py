@@ -19,6 +19,7 @@ orchestration itself is thereby fully testable offline.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shlex
@@ -99,7 +100,10 @@ class ArtifactPullError(LauncherError):
 #: Run ``command`` on the instance, streaming output, returning the exit code.
 RemoteExec = Callable[[Instance, str], Awaitable[int]]
 #: Pull ``remote_dir`` down into a local directory, returning the transfer's exit code.
-RemotePull = Callable[[Instance, str, Path], Awaitable[int]]
+#: Contract: ``(instance, remote_dir, local_dir, *, excludes=()) -> int`` — ``excludes`` are
+#: rsync-style patterns the transfer may skip (the scp fallback ignores them, documented in
+#: ``remote.make_rsync_pull``). Typed ``...`` because Callable cannot spell a keyword arg.
+RemotePull = Callable[..., Awaitable[int]]
 #: Push one local file up to ``remote_path``, returning the transfer's exit code.
 RemotePush = Callable[[Instance, Path, str], Awaitable[int]]
 #: Human-facing one-liner at the end of a run (Telegram, etc.). Failures are logged, never fatal.
@@ -220,6 +224,13 @@ class LaunchSpec:
     artifact_dir: Path | None = None
     #: Per-attempt ceiling on the artifact pull — see DEFAULT_PULL_TIMEOUT_S for the sizing story.
     pull_timeout_s: float = DEFAULT_PULL_TIMEOUT_S
+    #: Wedge detector: if the local artifact footprint grows by ZERO bytes for this long
+    #: mid-attempt, the transfer is dead, not slow — cut it and retry. Sized from the measured
+    #: failure (2026-08-20): a wedged ssh channel sat 1h43m moving nothing, and the retry that
+    #: followed completed in 13.7 s. Patience is not a strategy against a dead channel.
+    pull_stall_window_s: float = 180.0
+    #: How often the wedge detector samples the footprint (a directory walk — cheap).
+    pull_progress_poll_s: float = 15.0
     #: (local file, remote path) pairs copied up before the payload — for run inputs like
     #: calibrated question files that live under gitignored runs/ and so cannot be cloned.
     push: tuple[tuple[Path, str], ...] = ()
@@ -302,28 +313,74 @@ async def _pull_artifacts(
     failure is fatal (the artifacts are the deliverable); payload failed → the pull is best-effort
     forensics and must not mask the real error.
 
-    Each attempt is bounded by ``spec.pull_timeout_s`` — before this, a wedged transfer's only
-    ceiling was the max_hours hard kill, which billed the whole remaining window for idle
-    (observed twice, 2026-07-31). A timeout gets ONE retry (rsync resumes, so a near-end wedge
-    finishes in minutes), and after a second timeout the local disk gets the last word: artifacts
-    present → the run proceeds with a ``pull_timeout_partial`` event naming exactly what landed;
-    nothing present on a successful payload → the deliverable is lost and that is a failed run.
+    Each attempt is bounded twice: ``spec.pull_timeout_s`` is the hard ceiling, and the wedge
+    detector cuts an attempt early when the local footprint stops growing for
+    ``spec.pull_stall_window_s`` — a dead channel is not a slow transfer, and the measured wedge
+    (2026-08-20) sat 1h43m doing nothing its 13.7 s retry didn't. A cut attempt gets ONE retry
+    (rsync resumes, so partial progress is kept), and after the second the local disk gets the
+    last word: artifacts present → the run proceeds with a ``pull_timeout_partial`` event naming
+    exactly what landed; nothing present on a successful payload → the deliverable is lost and
+    that is a failed run. On a FAILED payload the pull is scoped to telemetry only
+    (``checkpoints/`` excluded): the evidence comes home, the dead run's shards do not.
     """
     if spec.artifact_dir is None:
         return
+    # Gate-aware scope (2026-08-20): a failed payload's weights are dead spend. v5 hauled
+    # 27.6 GB of shards off a run its own gate had just refused — 64% of that run's cost,
+    # spent after the verdict was in. Telemetry IS a failed run's deliverable (it is the
+    # refilter's evidence and the reason the probe existed); the checkpoints are not. On
+    # success everything comes home as before — a passed probe's checkpoint is the resume
+    # seed and the whole point.
+    excludes = () if exit_code == 0 else ("checkpoints/",)
+    scope = "full" if exit_code == 0 else "telemetry-only"
     for attempt in (1, 2):
-        events.emit("pull_started", attempt=attempt, timeout_s=spec.pull_timeout_s)
+        events.emit("pull_started", attempt=attempt, timeout_s=spec.pull_timeout_s, scope=scope)
         started = time.monotonic()
+        pull_task = asyncio.ensure_future(
+            remote_pull(instance, spec.remote_artifact_dir, spec.artifact_dir, excludes=excludes)
+        )
+        stalled = False
         try:
             async with asyncio.timeout(spec.pull_timeout_s):
-                pull_rc = await remote_pull(instance, spec.remote_artifact_dir, spec.artifact_dir)
+                # Wedge detector: rsync --partial writes as it transfers, so footprint growth
+                # is ground truth for progress. Zero new bytes for pull_stall_window_s means a
+                # dead channel, and cutting it beats waiting — the measured wedge sat 1h43m
+                # doing nothing that its 13.7 s retry didn't.
+                last_size = _artifact_footprint(spec.artifact_dir)[1]
+                last_change = time.monotonic()
+                while True:
+                    done, _ = await asyncio.wait({pull_task}, timeout=spec.pull_progress_poll_s)
+                    if done:
+                        break
+                    size = _artifact_footprint(spec.artifact_dir)[1]
+                    if size != last_size:
+                        last_size, last_change = size, time.monotonic()
+                    elif time.monotonic() - last_change >= spec.pull_stall_window_s:
+                        stalled = True
+                        break
         except TimeoutError:
+            pull_task.cancel()
+            with contextlib.suppress(BaseException):
+                await pull_task
             events.emit(
                 "pull_timeout",
                 attempt=attempt,
                 elapsed_s=round(time.monotonic() - started, 1),
             )
             continue
+        if stalled:
+            pull_task.cancel()
+            with contextlib.suppress(BaseException):
+                await pull_task
+            events.emit(
+                "pull_stalled",
+                attempt=attempt,
+                elapsed_s=round(time.monotonic() - started, 1),
+                bytes_on_disk=last_size,
+            )
+            continue
+        try:
+            pull_rc = pull_task.result()
         except Exception as exc:
             if exit_code == 0:
                 raise ArtifactPullError(f"artifact pull raised: {exc!r}") from exc
@@ -344,8 +401,9 @@ async def _pull_artifacts(
         events.emit("artifact_pull_failed", exit_code=pull_rc)
         return
 
-    # Two timeouts. The transfer process never answered — but the files it may have already
-    # written are real either way, and terminate is about to wipe the only other copy.
+    # Two attempts ended by timeout or stall. The transfer never answered — but the files it
+    # may have already written are real either way, and terminate is about to wipe the only
+    # other copy.
     files, size = _artifact_footprint(spec.artifact_dir)
     if files and exit_code == 0:
         events.emit(
@@ -357,12 +415,16 @@ async def _pull_artifacts(
         return
     if exit_code == 0:
         raise ArtifactPullError(
-            f"artifact pull timed out twice ({spec.pull_timeout_s:.0f}s per attempt) with "
-            "nothing in the local artifact dir — the deliverable is lost"
+            f"artifact pull timed out or stalled twice ({spec.pull_timeout_s:.0f}s ceiling, "
+            f"{spec.pull_stall_window_s:.0f}s stall window) with nothing in the local artifact "
+            "dir — the deliverable is lost"
         )
     events.emit(
         "artifact_pull_failed",
-        error=f"timed out twice ({spec.pull_timeout_s:.0f}s per attempt); {files} file(s) on disk",
+        error=(
+            f"timed out or stalled twice ({spec.pull_timeout_s:.0f}s ceiling); "
+            f"{files} file(s) on disk"
+        ),
     )
 
 
