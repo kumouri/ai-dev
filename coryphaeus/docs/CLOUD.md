@@ -111,12 +111,15 @@ uv run python coryphaeus/scripts/cloud_run.py --provider runpod --chain validate
 
 ### `--chain probe` — measure before committing
 
-The ~20-step probe run whose telemetry feeds `scripts/gate_zero_std.py`: it measures what
-fraction of optimizer steps have zero reward variance (all k rollouts scored identically — steps
-that teach nothing) on the *current* question set with the *current* policy. Each launch probes
-its own label-derived question window (`--seed` is derived from the run label): before that,
-train_grpo's seed defaulted to 0 and every probe graded the *same* 20-question sample — two
-gates in a row measured one window twice while the rest of the set went unseen.
+The probe run (`--probe-steps`, default **40**) whose telemetry feeds `scripts/gate_zero_std.py`:
+it measures what fraction of optimizer steps have zero reward variance (all k rollouts scored
+identically — steps that teach nothing) on the *current* question set with the *current* policy.
+Each launch probes its own label-derived question window (`--seed` is derived from the run
+label): before that, train_grpo's seed defaulted to 0 and every probe graded the *same*
+20-question sample — two gates in a row measured one window twice while the rest of the set went
+unseen. The default is 40 because n=20 made the verdict a coin flip near the threshold: three
+straight probes read 30%, 25% and exactly 20% (2026-08-01..20), each one group away from the
+other verdict. Doubling the sample costs ~40 probe-minutes and buys a gate whose word holds.
 
 ### `--chain full` — probe, gate, then the real run
 

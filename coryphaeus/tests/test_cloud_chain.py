@@ -31,6 +31,7 @@ def chain_args(**overrides) -> argparse.Namespace:
         chain="full",
         k=4,
         steps=200,
+        probe_steps=40,
         max_hours=8.0,
         gate_threshold=0.2,
         questions_file="coryphaeus/runs/calibrated.jsonl",
@@ -167,10 +168,10 @@ def test_flat_rate_selections_reserve_nothing():
 
 
 def test_token_reserve_prices_the_worst_case_at_the_priciest_seat():
-    """(20 probe + 200 full) steps x k=4 x 5 calls, every call at or-dear's prices — the settle
+    """(40 probe + 200 full) steps x k=4 x 5 calls, every call at or-dear's prices — the settle
     reports reality; the reservation must bound it."""
     per_call = (0.135 * 600 + 0.40 * 1024) / 1_000_000
-    expected = round(per_call * 220 * 4 * 5, 4)
+    expected = round(per_call * 240 * 4 * 5, 4)
     got = _cloud_run.token_reserve_usd(
         PAID_ENTRIES, chain="full", steps=200, k=4, providers=("featherless", "openrouter")
     )
@@ -184,4 +185,25 @@ def test_probe_chains_reserve_only_the_probe_steps():
     probe = _cloud_run.token_reserve_usd(
         PAID_ENTRIES, chain="probe", steps=200, k=4, providers=("openrouter",)
     )
-    assert probe == round(full * 20 / 220, 4)
+    assert probe == round(full * 40 / 240, 4)
+
+
+def test_probe_steps_drive_both_the_chain_and_the_reservation():
+    """The gate's sample size is one knob: what the probe trains is what the reservation
+    prices. At n=20 three straight verdicts (30%, 25%, exactly 20%) each sat one group from
+    flipping — the default is 40 so the gate's word means something."""
+    import pytest
+
+    chain = build_chain(chain_args(), "run-label")
+    probe_stage = next(s for s in chain.split(" && ") if "train_grpo.py" in s)
+    assert "--max-steps 40" in probe_stage
+    shorter = _cloud_run.token_reserve_usd(
+        PAID_ENTRIES, chain="probe", steps=200, k=4, providers=("openrouter",), probe_steps=20
+    )
+    default = _cloud_run.token_reserve_usd(
+        PAID_ENTRIES, chain="probe", steps=200, k=4, providers=("openrouter",)
+    )
+    # approx, not ==: both values are independently rounded to 4 places, so doubling the
+    # rounded 20-step figure can differ from the rounded 40-step figure by a ten-thousandth.
+    assert default == pytest.approx(shorter * 2, abs=0.0002)
+    assert _cloud_run.parse_args(["--provider", "fake"]).probe_steps == 40
