@@ -37,6 +37,7 @@ import os
 import shlex
 import subprocess
 import sys
+import zlib
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -219,6 +220,12 @@ def build_chain(args: argparse.Namespace, train_label: str) -> str:
     run = "uv run --no-sync python"
     questions = f" --questions-file {REMOTE_QUESTIONS}" if args.questions_file else ""
     checkpoints = f" --checkpoint-dir {REMOTE_RUNS_DIR}/checkpoints"
+    # One seed per launch, derived from the label. train_grpo's --seed defaults to 0, so before
+    # this every probe graded the SAME question window — the 2026-08-01 and 2026-08-20 gates
+    # measured one 20-question sample twice while the other 95 questions went unseen. Probe and
+    # full share the seed so the resumed run continues the same sampling plan; different launches
+    # get different windows. Derived, not random: a relaunched label reproduces its draw.
+    seed = zlib.crc32(train_label.encode("utf-8")) & 0x7FFFFFFF
     # The pool a box may use is exactly the providers whose keys ride provision(env=...) — the
     # same --worker-providers value drives the pushed env (see worker_env) and this filter, so
     # they cannot drift apart. The manifest is multi-provider; an unfiltered registry build on
@@ -227,7 +234,7 @@ def build_chain(args: argparse.Namespace, train_label: str) -> str:
 
     probe = (
         f"{run} coryphaeus/scripts/train_grpo.py --label {train_label} --k {args.k} "
-        f"--max-steps 20{checkpoints}{questions}{providers}"
+        f"--max-steps 20 --seed {seed}{checkpoints}{questions}{providers}"
     )
     gate = (
         f"{run} coryphaeus/scripts/gate_zero_std.py --label {train_label} "
@@ -238,8 +245,8 @@ def build_chain(args: argparse.Namespace, train_label: str) -> str:
     deadline = max(0.5, args.max_hours - 1.5)
     full = (
         f"{run} coryphaeus/scripts/train_grpo.py --label {train_label} --k {args.k} "
-        f"--max-steps {args.steps} --deadline-hours {deadline:.2f}{checkpoints}{questions} "
-        f"--resume{providers}"
+        f"--max-steps {args.steps} --seed {seed} --deadline-hours {deadline:.2f}"
+        f"{checkpoints}{questions} --resume{providers}"
     )
     return {
         "probe": probe,

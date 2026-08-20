@@ -113,15 +113,25 @@ uv run python coryphaeus/scripts/cloud_run.py --provider runpod --chain validate
 
 The ~20-step probe run whose telemetry feeds `scripts/gate_zero_std.py`: it measures what
 fraction of optimizer steps have zero reward variance (all k rollouts scored identically — steps
-that teach nothing) on the *current* question set with the *current* policy.
+that teach nothing) on the *current* question set with the *current* policy. Each launch probes
+its own label-derived question window (`--seed` is derived from the run label): before that,
+train_grpo's seed defaulted to 0 and every probe graded the *same* 20-question sample — two
+gates in a row measured one window twice while the rest of the set went unseen.
 
 ### `--chain full` — probe, gate, then the real run
 
 Runs the probe first, applies the gate to its telemetry, and continues into the full run **only
 on a PASS**. Gate semantics (from `gate_zero_std.py`, unchanged here):
 
-- **PASS** = zero-variance fraction strictly under **20%** (`--threshold 0.2`; exactly 20% is a
-  FAIL — a tie goes to not shipping).
+- **PASS** = *question-dead* zero-variance fraction strictly under **20%** (`--threshold 0.2`;
+  exactly 20% is a FAIL — a tie goes to not shipping).
+- **Question-dead** counts only groups the policy actually engaged: all k scores identical AND at
+  least two rollouts parsed. A zero-variance group with ≤1 parsed rollout is a **parse-storm** —
+  the policy failing to emit valid workflows, k times — reported beside the fraction but not in
+  it. Measured 2026-08-01/20: the probe policy parse-fails ~half its rollouts, so iid chance
+  alone manufactures ~24% zero-at-zero groups on a sound set; two gates FAILed in a row on
+  exactly that before the accounting learned to tell the two apart. Unanimous-*correct* groups
+  are parsed by construction, so the r4 disease (too-easy questions) stays fully counted.
 - **FAIL** = the question set is mis-calibrated: fix the filter, not the trainer, and re-run the
   probe. r4 spent 56% of its GPU time on zero-variance groups; the gate exists so a paid box
   never repeats that.

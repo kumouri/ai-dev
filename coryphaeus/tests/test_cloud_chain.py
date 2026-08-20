@@ -60,6 +60,26 @@ def test_probe_only_chain_carries_the_filter_too():
     assert "--providers featherless" in build_chain(chain_args(chain="probe"), "run-label")
 
 
+def test_probe_and_full_share_one_label_derived_seed():
+    """train_grpo's --seed defaults to 0, so before this every probe graded the SAME question
+    window (the 2026-08-01 and 2026-08-20 gates measured one 20-question sample twice). The
+    chain must pass a seed derived from the label: probe and full share it (the resumed run
+    continues the same sampling plan), different labels draw different windows, and the same
+    label reproduces its draw."""
+
+    def seeds(chain: str) -> set[str]:
+        return {
+            stage.split("--seed ")[1].split()[0]
+            for stage in chain.split(" && ")
+            if "train_grpo.py" in stage
+        }
+
+    first = seeds(build_chain(chain_args(), "run-label"))
+    assert len(first) == 1
+    assert first == seeds(build_chain(chain_args(), "run-label"))  # reproducible
+    assert first != seeds(build_chain(chain_args(), "another-label"))  # varies by launch
+
+
 def test_remote_command_sources_the_runpod_env_file_before_anything():
     """RunPod images write the container env — the provision-injected worker keys — to
     /etc/rp_environment and source it only from ~/.bashrc, which a login shell never reads:
