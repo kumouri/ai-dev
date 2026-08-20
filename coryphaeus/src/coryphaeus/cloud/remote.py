@@ -96,22 +96,28 @@ def build_rsync_cmd(
     user: str = "root",
     keyfile: Path | None = None,
     known_hosts: Path | None = None,
+    excludes: Sequence[str] = (),
 ) -> list[str]:
     """argv for pulling ``remote_dir``'s *contents* into ``local_dir``.
 
     The trailing slash on the source is load-bearing rsync semantics: with it, contents land
     directly in ``local_dir``; without it, an extra directory level appears. ``--partial`` because
     the pull may race a wall-clock kill — a truncated 6 GB checkpoint that can resume beats a
-    deleted one.
+    deleted one. ``excludes`` are rsync patterns skipped by the transfer — how a failed run's
+    pull brings home the telemetry without the dead run's 27.6 GB of shards (2026-08-20).
     """
     transport = ["ssh", *_ssh_options(keyfile=keyfile, known_hosts=known_hosts)]
     if port is not None:
         transport += ["-p", str(port)]
     source = f"{user}@{host}:{remote_dir.rstrip('/')}/"
+    exclude_args: list[str] = []
+    for pattern in excludes:
+        exclude_args += ["--exclude", pattern]
     return [
         "rsync",
         "-az",
         "--partial",
+        *exclude_args,
         # rsync re-splits the -e string itself, honoring shell-style quotes — so quote each token
         # and a keyfile path containing spaces survives.
         "-e", " ".join(shlex.quote(token) for token in transport),
@@ -200,7 +206,13 @@ def make_rsync_pull(
 ):
     """The artifact-pull seam, real edition: rsync when available, scp otherwise."""
 
-    async def _pull(instance: Instance, remote_dir: str, local_dir: Path) -> int:
+    async def _pull(
+        instance: Instance,
+        remote_dir: str,
+        local_dir: Path,
+        *,
+        excludes: Sequence[str] = (),
+    ) -> int:
         if not instance.ssh_host:
             raise RuntimeError(f"instance {instance.instance_id} has no ssh endpoint yet")
         local_dir.mkdir(parents=True, exist_ok=True)
@@ -213,8 +225,13 @@ def make_rsync_pull(
                 user=user,
                 keyfile=keyfile,
                 known_hosts=known_hosts,
+                excludes=excludes,
             )
         else:
+            if excludes:
+                # scp cannot exclude; the universal fallback pulls everything. Say so rather
+                # than silently widening the transfer the caller asked to narrow.
+                print(f"[pull] scp fallback cannot honor excludes {list(excludes)}", flush=True)
             argv = build_scp_cmd(
                 [f"{user}@{instance.ssh_host}:{remote_dir}"],
                 str(local_dir),

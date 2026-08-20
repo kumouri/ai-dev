@@ -170,16 +170,26 @@ usually rights itself here.
 
 ### The artifact pull stalls (or seems to)
 
-The pull is bounded per attempt (`CORYPHAEUS_PULL_TIMEOUT_S`, default 5400 s — sized so a
-legitimately slow multi-GB checkpoint pull over a marketplace uplink fits; the reference healthy
-pull took 78 minutes) and retried once — rsync resumes, so the retry after a near-end wedge
-completes in minutes. After a second timeout the launcher checks the local artifact dir: files
-present → the run proceeds and `pull_timeout_partial` records exactly how many files and bytes
-landed (verify completeness before trusting a partial pull — but note the observed wedge had
-delivered *everything* before hanging); nothing present after a successful payload → the run
-fails with `ArtifactPullError`, because the deliverable is lost. Either way the box is
-terminated and settled — a stuck transfer costs minutes of patience, never the remaining
-`max_hours` window.
+The pull is bounded twice per attempt. The hard ceiling is `CORYPHAEUS_PULL_TIMEOUT_S` (default
+5400 s — sized so a legitimately slow multi-GB checkpoint pull over a marketplace uplink fits;
+the reference healthy pull took 78 minutes). Under it sits the **wedge detector**: if the local
+artifact footprint grows by zero bytes for `pull_stall_window_s` (180 s), the attempt is cut
+with a `pull_stalled` event and retried — a dead channel is not a slow transfer. Measured
+2026-08-20: a wedged ssh channel sat 1h43m moving nothing (and sailed 760 s past the ceiling,
+because the only thing watching it was the transfer it was watching), then the retry moved all
+27.6 GB in 13.7 s. rsync resumes, so a cut attempt keeps its partial progress. After a second
+cut the launcher checks the local artifact dir: files present → the run proceeds and
+`pull_timeout_partial` records exactly how many files and bytes landed (verify completeness
+before trusting a partial pull); nothing present after a successful payload → the run fails
+with `ArtifactPullError`, because the deliverable is lost. Either way the box is terminated and
+settled — a stuck transfer costs minutes of patience, never the remaining `max_hours` window.
+
+**The pull is also verdict-aware** (2026-08-20): after a FAILED payload — a gate FAIL included —
+it excludes `checkpoints/` and brings home telemetry only. The evidence is a failed run's whole
+deliverable; its shards are dead spend (v5 hauled 27.6 GB off a run its own gate had refused —
+64% of that run's cost, after the verdict). On a successful payload everything comes home,
+because a passed probe's checkpoint is the resume seed. The scp fallback cannot exclude and
+says so out loud rather than silently narrowing.
 
 ## Checkpoints and resume
 

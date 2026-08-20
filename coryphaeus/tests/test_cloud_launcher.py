@@ -156,9 +156,11 @@ def make_exec(log, *, exit_code=0, delay=0.0, exc: BaseException | None = None):
     return _exec
 
 
-def make_pull(log, *, exit_code=0):
-    async def _pull(instance, remote_dir, local_dir):
+def make_pull(log, *, exit_code=0, seen_excludes=None):
+    async def _pull(instance, remote_dir, local_dir, *, excludes=()):
         log.append("pull")
+        if seen_excludes is not None:
+            seen_excludes.append(tuple(excludes))
         return exit_code
 
     return _pull
@@ -169,7 +171,7 @@ def make_wedging_pull(log, *, hang_first=999):
     the 2026-07-31 failure shape, where the transfer process sat six hours after delivering."""
     calls = {"n": 0}
 
-    async def _pull(instance, remote_dir, local_dir):
+    async def _pull(instance, remote_dir, local_dir, *, excludes=()):
         calls["n"] += 1
         log.append("pull")
         if calls["n"] <= hang_first:
@@ -406,7 +408,7 @@ async def test_wedged_pull_with_nothing_on_disk_is_a_failed_run(tmp_path):
     log: list[str] = []
     ledger = ledger_for(tmp_path, log)
     spec = spec_for(tmp_path, pull_timeout_s=0.05)
-    with pytest.raises(ArtifactPullError, match="timed out twice"):
+    with pytest.raises(ArtifactPullError, match="timed out or stalled twice"):
         await run_launch(
             tmp_path, log, StubProvider(log), spec, ledger,
             remote_pull=make_wedging_pull(log),
@@ -433,6 +435,81 @@ async def test_pull_that_recovers_on_the_second_attempt_is_a_normal_success(tmp_
     pulled = next(e for e in events if e["phase"] == "artifacts_pulled")
     assert pulled["detail"]["files"] == 1
     assert pulled["detail"]["bytes"] == len(b"weights")
+
+
+def make_stalling_then_writing_pull(log, artifact_dir):
+    """Attempt one hangs moving nothing — the 2026-08-20 dead-channel shape; attempt two
+    delivers instantly, the way the measured 13.7 s retry did."""
+    calls = {"n": 0}
+
+    async def _pull(instance, remote_dir, local_dir, *, excludes=()):
+        calls["n"] += 1
+        log.append("pull")
+        if calls["n"] == 1:
+            await asyncio.Event().wait()
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        (artifact_dir / "model.safetensors").write_bytes(b"weights")
+        return 0
+
+    return _pull
+
+
+async def test_failed_payload_pull_is_telemetry_only(tmp_path):
+    """v5 (2026-08-20) hauled 27.6 GB of shards off a run its own gate had just refused — 64%
+    of the run's cost, spent after the verdict. A failed payload's pull scopes to telemetry:
+    the evidence comes home, the dead run's checkpoints stay behind."""
+    log: list[str] = []
+    seen: list[tuple] = []
+    with pytest.raises(RemoteFailure):
+        await run_launch(
+            tmp_path, log, StubProvider(log), spec_for(tmp_path), ledger_for(tmp_path, log),
+            remote_exec=make_exec(log, exit_code=1),
+            remote_pull=make_pull(log, seen_excludes=seen),
+        )  # fmt: skip
+    assert seen == [("checkpoints/",)]
+    started = next(e for e in read_events(tmp_path) if e["phase"] == "pull_started")
+    assert started["detail"]["scope"] == "telemetry-only"
+
+
+async def test_successful_payload_pull_takes_everything(tmp_path):
+    """On success the checkpoint IS the deliverable — no excludes, scope 'full'."""
+    log: list[str] = []
+    seen: list[tuple] = []
+    await run_launch(
+        tmp_path, log, StubProvider(log), spec_for(tmp_path), ledger_for(tmp_path, log),
+        remote_pull=make_pull(log, seen_excludes=seen),
+    )  # fmt: skip
+    assert seen == [()]
+    started = next(e for e in read_events(tmp_path) if e["phase"] == "pull_started")
+    assert started["detail"]["scope"] == "full"
+
+
+async def test_stalled_pull_is_cut_long_before_its_timeout(tmp_path):
+    """The 2026-08-20 wedge: a dead ssh channel moved zero bytes for 1h43m inside a timeout
+    that fired 760 s late, and the retry finished in 13.7 s. The wedge detector cuts a
+    no-progress attempt at the stall window instead — patience is not a strategy against a
+    dead channel."""
+    log: list[str] = []
+    spec = spec_for(
+        tmp_path, pull_timeout_s=60.0, pull_stall_window_s=0.03, pull_progress_poll_s=0.01
+    )
+    result = await run_launch(
+        tmp_path, log, StubProvider(log), spec, ledger_for(tmp_path, log),
+        remote_pull=make_stalling_then_writing_pull(log, tmp_path / "artifacts"),
+    )  # fmt: skip
+    assert result.exit_code == 0
+    assert log.count("pull") == 2
+    phases = [e["phase"] for e in read_events(tmp_path)]
+    assert phases.count("pull_stalled") == 1
+    assert "pull_timeout" not in phases
+    assert "artifacts_pulled" in phases
+
+
+def test_build_rsync_cmd_excludes_ride_the_argv():
+    argv = build_rsync_cmd("host", "/workspace/runs", Path("dest"), excludes=("checkpoints/",))
+    i = argv.index("--exclude")
+    assert argv[i + 1] == "checkpoints/"
+    assert i < argv.index("-e")  # excludes are rsync options, not transport options
 
 
 async def test_keyboard_interrupt_mid_run_terminates_and_settles(tmp_path):
