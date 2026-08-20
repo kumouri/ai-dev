@@ -42,7 +42,15 @@ import httpx
 
 from ...config import settings
 from ...workers.base import TRANSIENT_STATUSES
-from .base import GpuOffer, Instance, InstanceState, ProviderError, body_json, min_cuda
+from .base import (
+    GpuOffer,
+    Instance,
+    InstanceState,
+    ProviderError,
+    body_json,
+    min_compute_cap,
+    min_cuda,
+)
 
 
 class MissingApiKey(RuntimeError):
@@ -63,6 +71,11 @@ MIN_RELIABILITY = 0.98
 #: AFTER a fully-billed ~50-minute bootstrap. A host that does not report the field is refused
 #: too: an unknown driver is the same gamble at the same price.
 _min_cuda = min_cuda
+#: And the shared ARCHITECTURE floor (see ``base.min_compute_cap``) on the marketplace's
+#: ``compute_cap`` field — the failure the driver floor cannot see. Observed live 2026-08-20:
+#: a Tesla P40 (sm_61) behind a 13.0 driver was the cheapest offer on the market, passed every
+#: floor above, and died at torch's first kernel launch with cudaErrorNoKernelImageForDevice.
+_min_compute_cap = min_compute_cap
 
 
 #: ``actual_status`` → normalized state. The docs' own guidance (July 2026): once
@@ -301,6 +314,7 @@ class VastProvider:
             "inet_down": {"gte": MIN_INET_DOWN_MBPS},
             "reliability2": {"gte": MIN_RELIABILITY},
             "cuda_max_good": {"gte": _min_cuda()},
+            "compute_cap": {"gte": _min_compute_cap()},
             "order": [["dph_total", "asc"]],
             "limit": 64,
         }
@@ -318,6 +332,7 @@ class VastProvider:
             )
         excluded = _excluded_ids()
         min_cuda = _min_cuda()
+        min_cc = _min_compute_cap()
         rentable: list[GpuOffer] = []
         for raw in (data or {}).get("offers") or []:
             # round(), not floor: 24564 MB is a 24 GB card, and flooring it to 23 would fail
@@ -333,6 +348,11 @@ class VastProvider:
             # Missing counts as 0 and is refused: an unreported driver is the 12.8 gamble in
             # disguise, discovered only after a fully-billed bootstrap.
             if float(raw.get("cuda_max_good") or 0.0) < min_cuda:
+                continue
+            # Same rule one layer down: the driver floor cannot see silicon. A Pascal card
+            # behind a fresh driver passes cuda_max_good and dies at torch's first kernel
+            # launch (no sm_61 image in the pinned wheel — the 2026-08-20 P40 at $0.108/hr).
+            if float(raw.get("compute_cap") or 0) < min_cc:
                 continue
             if excluded and (
                 str(raw.get("host_id") or "") in excluded

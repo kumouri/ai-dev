@@ -119,3 +119,11 @@ uv run python coryphaeus/scripts/eval_trained.py --help  # score a trained check
   the GRPO reward is network-bound — every rollout calls the worker API from the rented box — so
   on a marketplace a cheap host with bad network is a slow host. Vast hosts also set their own
   egress prices, unlike RunPod's zero. See `docs/CLOUD.md`.
+- **The driver floor cannot see silicon — the compute-cap floor exists for that.** A Pascal card
+  behind a fresh driver reports `cuda_max_good` 13.0, passes `CORYPHAEUS_MIN_CUDA`, and dies at
+  torch's first kernel launch (`cudaErrorNoKernelImageForDevice` — live 2026-08-20, a Tesla P40
+  that was the market's cheapest 24 GB offer). `CORYPHAEUS_MIN_COMPUTE_CAP` (default 750 = sm_75,
+  matching the pinned wheel's kernel list; also refuses bf16-less sm_70 V100s) filters Vast
+  offers on `compute_cap`, double-enforced like every floor. Keep it in lockstep with the torch
+  pin, and never raise `--min-vram` to dodge a bad tier — that lever selects for exactly these
+  museum pieces.

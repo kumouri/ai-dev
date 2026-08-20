@@ -255,6 +255,18 @@ name; unset means "any CUDA version is acceptable" — the docs' words, and the 
 error still appears, the floor has drifted behind the torch pin — raise it in lockstep, not on
 a hunch.
 
+**`cudaErrorNoKernelImageForDevice` at the very first kernel launch.** The driver floor's blind
+spot: it measures *software*, and a museum-piece GPU behind a freshly-updated driver passes it
+clean. Observed live 2026-08-20 — a Tesla P40 (sm_61, Pascal) reporting `cuda_max_good` 13.0
+was the cheapest qualifying offer on the whole market, and torch 2.13.0+cu130 ships kernels for
+sm_75..sm_120 only, so training died at step 0 (a $0.016 lesson, thanks to the pull-terminate-
+settle path working). The *architecture* floor covers it: Vast filters offers on the
+marketplace's `compute_cap` field (`CORYPHAEUS_MIN_COMPUTE_CAP`, default 750 = sm_75), enforced
+server-side in the query and re-checked client-side like every other floor, missing-is-refused.
+750 also refuses the bf16-less sm_70 V100 band sitting just above Pascal in the price ladder.
+Like the driver floor, keep it in lockstep with the pinned torch's kernel list — the wheel's
+own warning names the sm list it ships.
+
 **A repeat offender in the cheap tier.** A host can *accept* the rental and never boot the
 image — pending until the provision timeout fires, sometimes for hours of retries in one night
 (2026-07-31: five straight failures, every one on a healthy-scoring host, because a reliability

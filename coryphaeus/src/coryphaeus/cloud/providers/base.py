@@ -40,6 +40,27 @@ def min_cuda() -> float:
         return DEFAULT_MIN_CUDA
 
 
+#: Minimum GPU compute capability, in the marketplace's integer spelling (750 = sm_75). Also
+#: torch's constraint, one layer below the driver floor above — and invisible to it: a Pascal
+#: host behind a freshly-updated driver reports ``cuda_max_good`` 13.0, passes ``min_cuda``,
+#: and then the pinned wheel (sm_75..sm_120 on torch 2.13.0+cu130) has no kernels for its
+#: silicon, so the payload dies at its first kernel launch with
+#: ``cudaErrorNoKernelImageForDevice`` (observed live 2026-08-20: a Tesla P40, sm_61, driver
+#: 13.0 — cheapest offer on the market and a terminal payload failure). 750 also refuses the
+#: bf16-less sm_70 V100 band sitting just above Pascal in the price ladder. Keep in lockstep
+#: with the oldest arch torch's pinned build ships kernels for; override via
+#: ``CORYPHAEUS_MIN_COMPUTE_CAP``.
+DEFAULT_MIN_COMPUTE_CAP = 750
+
+
+def min_compute_cap() -> int:
+    raw = os.environ.get("CORYPHAEUS_MIN_COMPUTE_CAP", "").strip()
+    try:
+        return int(raw) if raw else DEFAULT_MIN_COMPUTE_CAP
+    except ValueError:
+        return DEFAULT_MIN_COMPUTE_CAP
+
+
 def body_json(response) -> dict | list | None:
     """The response body as JSON, or ``None`` when it is not JSON at all.
 
