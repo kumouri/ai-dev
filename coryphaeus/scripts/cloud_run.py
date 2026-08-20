@@ -102,8 +102,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--chain",
         choices=("probe", "full", "validate"),
         default="validate",
-        help="probe = 20-step probe only; validate = probe + zero-variance gate (the first-run "
-        "choice); full = probe + gate + deadline-bounded full run resuming the probe's checkpoint",
+        help="probe = the --probe-steps probe only; validate = probe + zero-variance gate (the "
+        "first-run choice); full = probe + gate + deadline-bounded full run resuming the "
+        "probe's checkpoint",
     )
     parser.add_argument(
         "--questions-file",
@@ -114,6 +115,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--k", type=int, default=4, help="rollouts per question")
     parser.add_argument("--steps", type=int, default=200, help="full-run optimizer steps")
+    parser.add_argument(
+        "--probe-steps",
+        type=int,
+        default=40,
+        help="probe length = the gate's sample size. 40, not 20: at n=20 the verdict near the "
+        "threshold is a coin flip — the same corpus read 30%%, 25%% and exactly 20%% across "
+        "three probes (2026-08-01..20), each verdict one group from flipping. Doubling the "
+        "sample costs ~40 probe-minutes and buys a gate whose word means something.",
+    )
     parser.add_argument("--gate-threshold", type=float, default=0.2)
     parser.add_argument(
         "--worker-providers",
@@ -234,7 +244,7 @@ def build_chain(args: argparse.Namespace, train_label: str) -> str:
 
     probe = (
         f"{run} coryphaeus/scripts/train_grpo.py --label {train_label} --k {args.k} "
-        f"--max-steps 20 --seed {seed}{checkpoints}{questions}{providers}"
+        f"--max-steps {args.probe_steps} --seed {seed}{checkpoints}{questions}{providers}"
     )
     gate = (
         f"{run} coryphaeus/scripts/gate_zero_std.py --label {train_label} "
@@ -296,12 +306,18 @@ def worker_env(cfg, providers: tuple[str, ...]) -> dict[str, str]:
 
 
 def token_reserve_usd(
-    entries: list[dict], *, chain: str, steps: int, k: int, providers: tuple[str, ...]
+    entries: list[dict],
+    *,
+    chain: str,
+    steps: int,
+    k: int,
+    providers: tuple[str, ...],
+    probe_steps: int = 40,
 ) -> float:
     """Worst-case token spend for a training chain, from the manifest's own pinned prices.
 
     Every rollout is charged the maximum five workflow calls, each at the priciest selected
-    per-token seat, for every step of every stage in the chain (the probe's 20 plus the full
+    per-token seat, for every step of every stage in the chain (the probe's steps plus the full
     run's budget). Deliberately generous — the settle reports what the pulled telemetry says
     actually happened. Flat-rate-only selections cost 0.
     """
@@ -314,7 +330,7 @@ def token_reserve_usd(
         ),
         default=0.0,
     )
-    steps_total = 20 + (steps if chain == "full" else 0)
+    steps_total = probe_steps + (steps if chain == "full" else 0)
     return round(per_call * steps_total * k * 5, 4)
 
 
@@ -582,7 +598,12 @@ async def main(argv: list[str] | None = None) -> int:
     # from the pulled telemetry's own cost_usd receipts. A crash between the two over-counts —
     # the ledger's one allowed failure mode.
     token_reserve = token_reserve_usd(
-        load_manifest(), chain=args.chain, steps=args.steps, k=args.k, providers=worker_providers
+        load_manifest(),
+        chain=args.chain,
+        steps=args.steps,
+        k=args.k,
+        providers=worker_providers,
+        probe_steps=args.probe_steps,
     )
     tokens = token_ledger(cfg.runs_dir)
     if token_reserve:
