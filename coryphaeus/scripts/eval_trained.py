@@ -106,7 +106,7 @@ def generate_emissions(
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(
-        args.checkpoint, torch_dtype=torch.bfloat16, device_map="cuda"
+        args.checkpoint, dtype=torch.bfloat16, device_map="cuda"
     )
     model.eval()
 
